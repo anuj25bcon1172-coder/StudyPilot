@@ -1,22 +1,162 @@
 import 'dotenv/config';
-import express from 'express';
-import path from 'path';
-import fs from 'fs';
-import { fileURLToPath } from 'url';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import express, { type Request, type Response, type NextFunction } from 'express';
 import { GoogleGenAI, Type } from '@google/genai';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
+const PORT = Number(process.env.PORT) || 3000;
 const MODEL_NAME = 'gemini-4-hydrogen';
+const ALLOWED_IMAGE_MIME_TYPES = new Set([
+  'image/png',
+  'image/jpeg',
+  'image/webp',
+  'image/gif',
+]);
+const ALLOWED_REVISION_TOOLS = new Set([
+  'notes',
+  'questions',
+  'mcq',
+  'flashcards',
+  'summary',
+]);
 
-function getGeminiClient(): GoogleGenAI {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    throw new Error('GEMINI_API_KEY is not configured in environment secrets.');
+function loadFirebaseProjectId(): string | undefined {
+  if (process.env.FIREBASE_PROJECT_ID) return process.env.FIREBASE_PROJECT_ID.trim();
+  if (process.env.VITE_FIREBASE_PROJECT_ID) return process.env.VITE_FIREBASE_PROJECT_ID.trim();
+  try {
+    const configPath = path.resolve(process.cwd(), 'firebase-applet-config.json');
+    if (fs.existsSync(configPath)) {
+      const parsed = JSON.parse(fs.readFileSync(configPath, 'utf8')) as { projectId?: string };
+      if (parsed.projectId) return parsed.projectId.trim();
+    }
+  } catch {
+    // Ignore unreadable optional local config
+  }
+  return 'gen-lang-client-0612463551';
+}
+
+const FIREBASE_PROJECT_ID = loadFirebaseProjectId();
+
+let cachedCerts: Record<string, string> = {};
+let certsExpiresAt = 0;
+
+async function getFirebasePublicCerts(): Promise<Record<string, string>> {
+  const now = Date.now();
+  if (now < certsExpiresAt && Object.keys(cachedCerts).length > 0) {
+    return cachedCerts;
+  }
+  const resp = await fetch(
+    'https://www.googleapis.com/robot/v1/metadata/x509/securetoken@system.gserviceaccount.com'
+  );
+  if (!resp.ok) {
+    throw new Error(`Failed to fetch Firebase public keys (${resp.status})`);
+  }
+  const cacheControl = resp.headers.get('cache-control') || '';
+  const maxAgeMatch = cacheControl.match(/max-age=(\d+)/);
+  const maxAgeSeconds = maxAgeMatch ? Number(maxAgeMatch[1]) : 3600;
+  cachedCerts = (await resp.json()) as Record<string, string>;
+  certsExpiresAt = now + maxAgeSeconds * 1000;
+  return cachedCerts;
+}
+
+function decodeBase64Url(segment: string): Buffer {
+  const normalized = segment.replace(/-/g, '+').replace(/_/g, '/');
+  const padded = normalized + '='.repeat((4 - (normalized.length % 4)) % 4);
+  return Buffer.from(padded, 'base64');
+}
+
+async function verifyFirebaseIdToken(token: string): Promise<{ uid: string }> {
+  const parts = token.split('.');
+  if (parts.length !== 3) {
+    throw new Error('Malformed authentication token.');
+  }
+  const [headerB64, payloadB64, signatureB64] = parts;
+  const header = JSON.parse(decodeBase64Url(headerB64).toString('utf8')) as {
+    alg?: string;
+    kid?: string;
+  };
+  const payload = JSON.parse(decodeBase64Url(payloadB64).toString('utf8')) as {
+    aud?: string;
+    iss?: string;
+    sub?: string;
+    exp?: number;
+    iat?: number;
+  };
+
+  if (header.alg !== 'RS256' || !header.kid) {
+    throw new Error('Unsupported token signing algorithm.');
+  }
+
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  if (!payload.exp || payload.exp <= nowSeconds) {
+    throw new Error('Authentication token has expired.');
+  }
+  if (payload.iat && payload.iat > nowSeconds + 300) {
+    throw new Error('Authentication token is not yet valid.');
+  }
+  if (!payload.sub || typeof payload.sub !== 'string') {
+    throw new Error('Authentication token missing subject.');
+  }
+
+  if (FIREBASE_PROJECT_ID) {
+    if (payload.aud !== FIREBASE_PROJECT_ID) {
+      throw new Error('Authentication token audience mismatch.');
+    }
+    if (payload.iss !== `https://securetoken.google.com/${FIREBASE_PROJECT_ID}`) {
+      throw new Error('Authentication token issuer mismatch.');
+    }
+  }
+
+  const certs = await getFirebasePublicCerts();
+  const certPem = certs[header.kid];
+  if (!certPem) {
+    throw new Error('Unknown token signing key.');
+  }
+
+  const verifier = crypto.createVerify('RSA-SHA256');
+  verifier.update(`${headerB64}.${payloadB64}`);
+  verifier.end();
+  const valid = verifier.verify(certPem, decodeBase64Url(signatureB64));
+  if (!valid) {
+    throw new Error('Invalid authentication token signature.');
+  }
+
+  return { uid: payload.sub };
+}
+
+async function requireAuth(req: Request, res: Response, next: NextFunction): Promise<void> {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    res.status(401).json({ error: 'Sign in with Google is required to use AI study tools.' });
+    return;
+  }
+  const token = authHeader.slice('Bearer '.length).trim();
+  if (!token) {
+    res.status(401).json({ error: 'Authentication token is missing.' });
+    return;
+  }
+  try {
+    await verifyFirebaseIdToken(token);
+    next();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Invalid authentication session.';
+    res.status(401).json({ error: message });
+  }
+}
+
+function getAiClient(): GoogleGenAI {
+  const apiKey = process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY;
+  if (!apiKey || typeof apiKey !== 'string' || !apiKey.trim()) {
+    throw Object.assign(
+      new Error(
+        'GEMINI_API_KEY is not configured on the server. Set GEMINI_API_KEY in Settings > Secrets.'
+      ),
+      { statusCode: 500 }
+    );
   }
   return new GoogleGenAI({
-    apiKey,
+    apiKey: apiKey.trim(),
     httpOptions: {
       headers: {
         'User-Agent': 'aistudio-build',
@@ -25,24 +165,52 @@ function getGeminiClient(): GoogleGenAI {
   });
 }
 
-function formatApiError(err: unknown): { status: number; message: string } {
+function mapGeminiError(err: unknown): { statusCode: number; message: string } {
+  if (err && typeof err === 'object' && 'statusCode' in err) {
+    const statusCode = Number((err as { statusCode?: number }).statusCode) || 500;
+    const message = err instanceof Error ? err.message : 'Request failed.';
+    return { statusCode, message };
+  }
   const raw = err instanceof Error ? err.message : String(err);
-  if (raw.includes('PERMISSION_DENIED') || raw.includes('API_KEY_INVALID')) {
+  if (raw.includes('API_KEY_INVALID') || raw.includes('PERMISSION_DENIED')) {
     return {
-      status: 400,
-      message: 'Please verify your Gemini API key in Settings > Secrets.',
+      statusCode: 403,
+      message: 'Invalid or unauthorized Gemini API key. Check GEMINI_API_KEY in Settings > Secrets.',
     };
   }
   if (raw.includes('RESOURCE_EXHAUSTED') || raw.includes('429')) {
     return {
-      status: 429,
+      statusCode: 429,
       message: 'Gemini API rate limit reached. Please wait a moment and try again.',
     };
   }
+  if (raw.includes('NOT_FOUND') || raw.includes('404')) {
+    return {
+      statusCode: 404,
+      message: 'Requested Gemini model was not found or is unavailable.',
+    };
+  }
   return {
-    status: 500,
-    message: raw || 'An unexpected error occurred while contacting Gemini.',
+    statusCode: 502,
+    message: raw || 'Failed to generate AI response.',
   };
+}
+
+function sanitizeHistory(
+  raw: unknown
+): Array<{ role: 'user' | 'model'; text: string }> {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .slice(-12)
+    .filter(
+      (item): item is { role: unknown; text: unknown } =>
+        Boolean(item) && typeof item === 'object'
+    )
+    .map((item) => ({
+      role: (item.role === 'model' ? 'model' : 'user') as 'user' | 'model',
+      text: typeof item.text === 'string' ? item.text.slice(0, 4000) : '',
+    }))
+    .filter((item) => item.text.length > 0);
 }
 
 async function startServer() {
@@ -50,51 +218,50 @@ async function startServer() {
   app.use(express.json({ limit: '10mb' }));
 
   app.get('/api/health', (_req, res) => {
-    res.json({ ok: true, service: 'studypilot-api' });
+    res.json({ ok: true });
   });
 
-  // 1. AI Assignment Solver (Step-by-step + Multimodal Image + Follow-up)
-  app.post('/api/ai/solve', async (req, res) => {
+  app.post('/api/gemini/solve', requireAuth, async (req, res) => {
     try {
-      const { question, subject, imageBase64, imageMimeType, followUpHistory, followUpMessage } = req.body ?? {};
-      const ai = getGeminiClient();
+      const { question, subject, imageBase64, imageMimeType } = req.body ?? {};
+      const cleanQuestion = typeof question === 'string' ? question.trim().slice(0, 4000) : '';
+      const cleanSubject = typeof subject === 'string' ? subject.trim().slice(0, 80) : '';
+      const cleanImage = typeof imageBase64 === 'string' ? imageBase64.trim() : '';
 
-      if (followUpMessage && typeof followUpMessage === 'string') {
-        const contextLines = Array.isArray(followUpHistory)
-          ? followUpHistory.map((m: { role: string; text: string }) => `${m.role === 'user' ? 'Student' : 'Solver'}: ${m.text}`).join('\n')
-          : '';
-
-        const response = await ai.models.generateContent({
-          model: MODEL_NAME,
-          contents: `Original Question (${subject || 'General'}): ${question || 'Uploaded problem'}\n\nConversation so far:\n${contextLines}\n\nStudent follow-up: ${followUpMessage}`,
-          config: {
-            systemInstruction:
-              'You are StudyPilot Solver, an expert STEM, coding, and theory tutor. Answer the student follow-up clearly and concisely. Wrap inline math in $...$ and block equations in $$...$$ using valid LaTeX. Keep formatting clean and scannable.',
-          },
-        });
-
-        res.json({ reply: response.text ?? 'Unable to generate follow-up response.' });
+      if (!cleanQuestion && !cleanImage) {
+        res.status(400).json({ error: 'Enter a question or upload an image of your problem.' });
         return;
       }
 
-      if (!question && !imageBase64) {
-        res.status(400).json({ error: 'Please enter a question or upload a problem image.' });
-        return;
-      }
+      const ai = getAiClient();
+      const parts: Array<
+        { text: string } | { inlineData: { mimeType: string; data: string } }
+      > = [];
 
-      const parts: Array<{ text: string } | { inlineData: { mimeType: string; data: string } }> = [];
-      if (imageBase64 && typeof imageBase64 === 'string') {
-        const cleanBase64 = imageBase64.includes(',') ? imageBase64.split(',')[1] : imageBase64;
+      if (cleanImage) {
+        const mime =
+          typeof imageMimeType === 'string' && ALLOWED_IMAGE_MIME_TYPES.has(imageMimeType)
+            ? imageMimeType
+            : 'image/png';
+        const data = cleanImage.includes(',') ? cleanImage.split(',')[1] : cleanImage;
+        if (!data || data.length > 9_000_000) {
+          res.status(400).json({ error: 'Uploaded image exceeds the allowed size.' });
+          return;
+        }
         parts.push({
           inlineData: {
-            mimeType: typeof imageMimeType === 'string' && imageMimeType ? imageMimeType : 'image/png',
-            data: cleanBase64,
+            mimeType: mime,
+            data,
           },
         });
       }
 
       parts.push({
-        text: `Solve this student assignment problem thoroughly step-by-step.\nSubject hint: ${subject || 'Auto-detect (Mathematics, Programming, Physics, Chemistry, or Theory)'}\nQuestion: ${question || 'Read and solve the problem shown in the attached image.'}`,
+        text: `Solve this student assignment problem thoroughly step-by-step.\nSubject hint: ${
+          cleanSubject || 'Auto-detect (Mathematics, Programming, Physics, Chemistry, or Theory)'
+        }\nQuestion: ${
+          cleanQuestion || 'Read and solve the problem shown in the attached image.'
+        }`,
       });
 
       const response = await ai.models.generateContent({
@@ -107,22 +274,22 @@ async function startServer() {
           responseSchema: {
             type: Type.OBJECT,
             properties: {
-              subject: { type: Type.STRING, description: 'Detected academic subject such as Mathematics, Differential Equations, Programming, Physics, or Theory.' },
-              title: { type: Type.STRING, description: 'Short descriptive title for the solved problem.' },
+              subject: { type: Type.STRING },
+              title: { type: Type.STRING },
               steps: {
                 type: Type.ARRAY,
                 items: {
                   type: Type.OBJECT,
                   properties: {
                     stepNumber: { type: Type.INTEGER },
-                    title: { type: Type.STRING, description: 'Short step heading like Find the integrating factor.' },
-                    explanation: { type: Type.STRING, description: 'Clear explanation of this step; inline LaTeX allowed with $...$.' },
-                    formula: { type: Type.STRING, description: 'Primary LaTeX math equation or key code expression for this step, or empty string if none.' },
+                    title: { type: Type.STRING },
+                    explanation: { type: Type.STRING },
+                    formula: { type: Type.STRING },
                   },
                   required: ['stepNumber', 'title', 'explanation', 'formula'],
                 },
               },
-              finalAnswer: { type: Type.STRING, description: 'Concise final answer with LaTeX wrapped in $...$ if mathematical.' },
+              finalAnswer: { type: Type.STRING },
             },
             required: ['subject', 'title', 'steps', 'finalAnswer'],
           },
@@ -132,32 +299,74 @@ async function startServer() {
       const parsed = JSON.parse((response.text ?? '{}').trim());
       res.json(parsed);
     } catch (err) {
-      const formatted = formatApiError(err);
-      res.status(formatted.status).json({ error: formatted.message });
+      const mapped = mapGeminiError(err);
+      res.status(mapped.statusCode).json({ error: mapped.message });
     }
   });
 
-  // 2. AI Learning Assistant (4-section structured concept explainer + Simple English toggle)
-  app.post('/api/ai/learn', async (req, res) => {
+  app.post('/api/gemini/solve-followup', requireAuth, async (req, res) => {
     try {
-      const { question, simpleEnglish, history } = req.body ?? {};
-      if (!question || typeof question !== 'string') {
-        res.status(400).json({ error: 'Please enter a concept or question to learn.' });
+      const { question, subject, followUpHistory, followUpMessage } = req.body ?? {};
+      const cleanMessage =
+        typeof followUpMessage === 'string' ? followUpMessage.trim().slice(0, 2000) : '';
+      if (!cleanMessage) {
+        res.status(400).json({ error: 'Follow-up message is required.' });
         return;
       }
 
-      const ai = getGeminiClient();
-      const priorContext = Array.isArray(history) && history.length > 0
-        ? `Previous conversation:\n${history.slice(-4).map((h: { role: string; text: string }) => `${h.role}: ${h.text}`).join('\n')}\n\n`
-        : '';
+      const cleanQuestion = typeof question === 'string' ? question.trim().slice(0, 4000) : '';
+      const cleanSubject = typeof subject === 'string' ? subject.trim().slice(0, 80) : '';
+      const history = sanitizeHistory(followUpHistory);
+      const contextLines = history
+        .map((m) => `${m.role === 'user' ? 'Student' : 'Solver'}: ${m.text}`)
+        .join('\n');
 
-      const toneInstruction = simpleEnglish
+      const ai = getAiClient();
+      const response = await ai.models.generateContent({
+        model: MODEL_NAME,
+        contents: `Original Question (${cleanSubject || 'General'}): ${
+          cleanQuestion || 'Uploaded problem'
+        }\n\nConversation so far:\n${contextLines}\n\nStudent follow-up: ${cleanMessage}`,
+        config: {
+          systemInstruction:
+            'You are StudyPilot Solver, an expert STEM, coding, and theory tutor. Answer the student follow-up clearly and concisely. Wrap inline math in $...$ and block equations in $$...$$ using valid LaTeX. Keep formatting clean and scannable.',
+        },
+      });
+
+      res.json({ text: response.text ?? 'Unable to generate follow-up response.' });
+    } catch (err) {
+      const mapped = mapGeminiError(err);
+      res.status(mapped.statusCode).json({ error: mapped.message });
+    }
+  });
+
+  app.post('/api/gemini/assistant', requireAuth, async (req, res) => {
+    try {
+      const { question, simpleEnglish, history } = req.body ?? {};
+      const cleanQuestion = typeof question === 'string' ? question.trim().slice(0, 4000) : '';
+      if (!cleanQuestion) {
+        res.status(400).json({ error: 'Question is required.' });
+        return;
+      }
+
+      const useSimple = Boolean(simpleEnglish);
+      const cleanHistory = sanitizeHistory(history);
+      const priorContext =
+        cleanHistory.length > 0
+          ? `Previous conversation:\n${cleanHistory
+              .slice(-4)
+              .map((h) => `${h.role}: ${h.text}`)
+              .join('\n')}\n\n`
+          : '';
+
+      const toneInstruction = useSimple
         ? 'Explain using super clear, everyday Simple English suitable for a beginner. Avoid dense academic jargon and use concrete analogies.'
         : 'Explain with rigorous university-level clarity while keeping every step structured and intuitive.';
 
+      const ai = getAiClient();
       const response = await ai.models.generateContent({
         model: MODEL_NAME,
-        contents: `${priorContext}Student Question: ${question}`,
+        contents: `${priorContext}Student Question: ${cleanQuestion}`,
         config: {
           systemInstruction: `You are StudyPilot AI Learning Assistant. ${toneInstruction} Format your response strictly into four distinct sections: Simple Explanation, Core Formula or Rule, Worked Example, and Line-by-Line Walkthrough. Use clean LaTeX for mathematical expressions inside formula fields (without surrounding $$) and $...$ for inline math in prose.`,
           responseMimeType: 'application/json',
@@ -165,32 +374,37 @@ async function startServer() {
             type: Type.OBJECT,
             properties: {
               topicTitle: { type: Type.STRING },
-              simpleExplanation: { type: Type.STRING, description: 'Clear 2-4 sentence explanation of the concept.' },
+              simpleExplanation: { type: Type.STRING },
               coreFormulaOrRule: {
                 type: Type.OBJECT,
                 properties: {
-                  label: { type: Type.STRING, description: 'Name of the formula or core principle.' },
-                  formula: { type: Type.STRING, description: 'LaTeX formula or concise rule statement.' },
-                  note: { type: Type.STRING, description: 'Meaning of variables or key condition.' },
+                  label: { type: Type.STRING },
+                  formula: { type: Type.STRING },
+                  note: { type: Type.STRING },
                 },
                 required: ['label', 'formula', 'note'],
               },
               example: {
                 type: Type.OBJECT,
                 properties: {
-                  scenario: { type: Type.STRING, description: 'Concrete input values or example setup.' },
-                  expression: { type: Type.STRING, description: 'LaTeX worked calculation or code line.' },
-                  result: { type: Type.STRING, description: 'Clear final outcome.' },
+                  scenario: { type: Type.STRING },
+                  expression: { type: Type.STRING },
+                  result: { type: Type.STRING },
                 },
                 required: ['scenario', 'expression', 'result'],
               },
               walkthrough: {
                 type: Type.ARRAY,
                 items: { type: Type.STRING },
-                description: '3 to 6 numbered line-by-line walkthrough steps.',
               },
             },
-            required: ['topicTitle', 'simpleExplanation', 'coreFormulaOrRule', 'example', 'walkthrough'],
+            required: [
+              'topicTitle',
+              'simpleExplanation',
+              'coreFormulaOrRule',
+              'example',
+              'walkthrough',
+            ],
           },
         },
       });
@@ -198,28 +412,33 @@ async function startServer() {
       const parsed = JSON.parse((response.text ?? '{}').trim());
       res.json(parsed);
     } catch (err) {
-      const formatted = formatApiError(err);
-      res.status(formatted.status).json({ error: formatted.message });
+      const mapped = mapGeminiError(err);
+      res.status(mapped.statusCode).json({ error: mapped.message });
     }
   });
 
-  // 3. Quick Revision Centre (Notes, Important Questions, MCQ Quiz, Flashcards, 5-Min Summary)
-  app.post('/api/ai/revise', async (req, res) => {
+  app.post('/api/gemini/revision', requireAuth, async (req, res) => {
     try {
       const { tool, input } = req.body ?? {};
-      if (!input || typeof input !== 'string') {
-        res.status(400).json({ error: 'Please paste study notes or enter a topic first.' });
+      if (typeof tool !== 'string' || !ALLOWED_REVISION_TOOLS.has(tool)) {
+        res.status(400).json({ error: 'Invalid revision tool requested.' });
+        return;
+      }
+      const cleanInput = typeof input === 'string' ? input.trim().slice(0, 15000) : '';
+      if (!cleanInput) {
+        res.status(400).json({ error: 'Please enter a topic or paste your study notes first.' });
         return;
       }
 
-      const ai = getGeminiClient();
+      const ai = getAiClient();
 
       if (tool === 'notes') {
         const response = await ai.models.generateContent({
           model: MODEL_NAME,
-          contents: `Create structured, exam-ready short revision notes for:\n${input}`,
+          contents: `Create structured, exam-ready short revision notes for:\n${cleanInput}`,
           config: {
-            systemInstruction: 'You are an expert academic summarizer. Create crisp, high-yield bulleted revision notes.',
+            systemInstruction:
+              'You are an expert academic summarizer. Create crisp, high-yield bulleted revision notes.',
             responseMimeType: 'application/json',
             responseSchema: {
               type: Type.OBJECT,
@@ -249,9 +468,10 @@ async function startServer() {
       if (tool === 'questions') {
         const response = await ai.models.generateContent({
           model: MODEL_NAME,
-          contents: `Generate 5 high-probability exam important questions with model answer key points for:\n${input}`,
+          contents: `Generate 5 high-probability exam important questions with model answer key points for:\n${cleanInput}`,
           config: {
-            systemInstruction: 'Generate focused exam preparation questions with concise scoring key points.',
+            systemInstruction:
+              'Generate focused exam preparation questions with concise scoring key points.',
             responseMimeType: 'application/json',
             responseSchema: {
               type: Type.OBJECT,
@@ -282,9 +502,10 @@ async function startServer() {
       if (tool === 'mcq') {
         const response = await ai.models.generateContent({
           model: MODEL_NAME,
-          contents: `Generate a 5-question multiple choice quiz for:\n${input}`,
+          contents: `Generate a 5-question multiple choice quiz for:\n${cleanInput}`,
           config: {
-            systemInstruction: 'Create 5 challenging, unambiguous 4-option multiple choice questions with accurate correctIndex (0-3) and brief explanation.',
+            systemInstruction:
+              'Create 5 challenging, unambiguous 4-option multiple choice questions with accurate correctIndex (0-3) and brief explanation.',
             responseMimeType: 'application/json',
             responseSchema: {
               type: Type.OBJECT,
@@ -316,9 +537,10 @@ async function startServer() {
       if (tool === 'flashcards') {
         const response = await ai.models.generateContent({
           model: MODEL_NAME,
-          contents: `Create 6 active-recall flashcards for:\n${input}`,
+          contents: `Create 6 active-recall flashcards for:\n${cleanInput}`,
           config: {
-            systemInstruction: 'Create concise front/back active-recall flashcards with a helpful memory hint.',
+            systemInstruction:
+              'Create concise front/back active-recall flashcards with a helpful memory hint.',
             responseMimeType: 'application/json',
             responseSchema: {
               type: Type.OBJECT,
@@ -346,12 +568,12 @@ async function startServer() {
         return;
       }
 
-      // Default: 5 Minutes Revision rapid summary
       const response = await ai.models.generateContent({
         model: MODEL_NAME,
-        contents: `Generate a rapid 5-minute last-minute revision summary for:\n${input}`,
+        contents: `Generate a rapid 5-minute last-minute revision summary for:\n${cleanInput}`,
         config: {
-          systemInstruction: 'Create a high-speed 5-minute exam cram summary with core takeaways, one must-remember formula/rule, and a 4-item recall checklist.',
+          systemInstruction:
+            'Create a high-speed 5-minute exam cram summary with core takeaways, one must-remember formula/rule, and a 4-item recall checklist.',
           responseMimeType: 'application/json',
           responseSchema: {
             type: Type.OBJECT,
@@ -362,36 +584,49 @@ async function startServer() {
               mustRememberFormula: { type: Type.STRING },
               fiveMinChecklist: { type: Type.ARRAY, items: { type: Type.STRING } },
             },
-            required: ['topic', 'summaryText', 'takeaways', 'mustRememberFormula', 'fiveMinChecklist'],
+            required: [
+              'topic',
+              'summaryText',
+              'takeaways',
+              'mustRememberFormula',
+              'fiveMinChecklist',
+            ],
           },
         },
       });
       res.json(JSON.parse((response.text ?? '{}').trim()));
     } catch (err) {
-      const formatted = formatApiError(err);
-      res.status(formatted.status).json({ error: formatted.message });
+      const mapped = mapGeminiError(err);
+      res.status(mapped.statusCode).json({ error: mapped.message });
     }
   });
 
-  // 4. Language Tutor Quick Session (powers Dashboard Language Tutor card)
-  app.post('/api/ai/language-tutor', async (req, res) => {
+  app.post('/api/gemini/language-tutor', requireAuth, async (req, res) => {
     try {
       const { prompt, targetLanguage } = req.body ?? {};
-      const ai = getGeminiClient();
+      const cleanPrompt =
+        typeof prompt === 'string' && prompt.trim()
+          ? prompt.trim().slice(0, 2000)
+          : 'Give me one quick academic vocabulary challenge and sentence correction exercise.';
+      const cleanLang =
+        typeof targetLanguage === 'string' && targetLanguage.trim()
+          ? targetLanguage.trim().slice(0, 80)
+          : 'Academic English & French';
 
+      const ai = getAiClient();
       const response = await ai.models.generateContent({
         model: MODEL_NAME,
-        contents: `Language track: ${targetLanguage || 'Academic English & French'}\nStudent message: ${prompt || 'Give me one quick academic vocabulary challenge and sentence correction exercise.'}`,
+        contents: `Language track: ${cleanLang}\nStudent message: ${cleanPrompt}`,
         config: {
           systemInstruction:
             'You are StudyPilot Language Tutor. Keep responses short, encouraging, and practical: give a quick correction or micro-challenge in 3-5 sentences.',
         },
       });
 
-      res.json({ reply: response.text ?? '' });
+      res.json({ text: response.text ?? '' });
     } catch (err) {
-      const formatted = formatApiError(err);
-      res.status(formatted.status).json({ error: formatted.message });
+      const mapped = mapGeminiError(err);
+      res.status(mapped.statusCode).json({ error: mapped.message });
     }
   });
 
@@ -403,25 +638,23 @@ async function startServer() {
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.resolve(__dirname, 'dist');
-    app.use(express.static(distPath));
-    app.get('*', (_req, res) => {
-      const indexFile = path.join(distPath, 'index.html');
-      if (fs.existsSync(indexFile)) {
-        res.sendFile(indexFile);
-      } else {
-        res.status(404).send('Build output not found.');
+    const distDir = path.resolve(process.cwd(), 'dist');
+    app.use(express.static(distDir));
+    app.get('*', (req, res, next) => {
+      if (req.path.startsWith('/api/')) {
+        next();
+        return;
       }
+      res.sendFile(path.join(distDir, 'index.html'));
     });
   }
 
-  const port = Number(process.env.PORT) || 3000;
-  app.listen(port, '0.0.0.0', () => {
-    console.log(`StudyPilot server listening on http://0.0.0.0:${port}`);
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`StudyPilot server listening on http://0.0.0.0:${PORT}`);
   });
 }
 
 startServer().catch((err) => {
-  console.error('Failed to start server:', err);
+  console.error('Failed to start StudyPilot server:', err);
   process.exit(1);
 });

@@ -1,0 +1,5 @@
+You are building 'Sturio.io — Smart Assignment Hub', an AI Study Assistant web app.
+
+- Tech Stack: Next.js (App Router), TypeScript, Tailwind CSS, Lucide Icons, KaTeX (for math rendering), and Recharts (for analytics).
+- Design System: Soft off-white background (#F8F9FB), crisp white rounded-2xl cards with subtle borders/shadows, primary purple (#6C5CE7), secondary teal (#00B894), and clean sans-serif typography.
+- Architecture: Keep modules cleanly separated inside src/components/ and API routes inside src/app/api/. Always ensure responsive design and zero TypeScript errors.

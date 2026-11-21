@@ -88,6 +88,24 @@
           "type": "string",
           "enum": ["Pending", "Completed", "Overdue"]
         },
+        "questionText": {
+          "type": "string",
+          "maxLength": 6000
+        },
+        "questionFile": {
+          "type": "object",
+          "description": "Optional uploaded question image or PDF stored as a compressed data URL."
+        },
+        "handwrittenSolution": {
+          "type": "object",
+          "description": "Optional uploaded handwritten solution (JPG, PNG, or PDF) stored as a compressed data URL."
+        },
+        "linkedSolvedAssignmentId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
         "createdAt": {
           "type": "string",
           "format": "date-time"
@@ -237,6 +255,57 @@
         }
       },
       "required": ["userId", "toolType", "topic", "summaryText", "items", "createdAt"]
+    },
+    "SolvedAssignment": {
+      "title": "SolvedAssignment",
+      "description": "Named assignment solution saved from the AI Assignment Solver for reuse in Solver and Assignments library.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "assignmentName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "subject": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "question": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4000
+        },
+        "solution": {
+          "type": "object",
+          "properties": {
+            "title": {
+              "type": "string",
+              "maxLength": 200
+            },
+            "finalAnswer": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2000
+            },
+            "steps": {
+              "type": "array"
+            }
+          },
+          "required": ["finalAnswer", "steps"]
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["userId", "assignmentName", "subject", "question", "solution", "createdAt"]
     }
   },
   "firestore": {
@@ -263,6 +332,10 @@
     "/users/{userId}/revisionItems/{itemId}": {
       "schema": { "$ref": "#/entities/RevisionItem" },
       "description": "Saved Quick Revision Centre study decks and summaries."
+    },
+    "/users/{userId}/solvedAssignments/{solvedId}": {
+      "schema": { "$ref": "#/entities/SolvedAssignment" },
+      "description": "Named solved assignments saved by the student from the AI Assignment Solver."
     }
   }
 }

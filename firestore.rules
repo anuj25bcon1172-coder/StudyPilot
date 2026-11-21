@@ -55,15 +55,35 @@ service cloud.firestore {
         data.updatedAt is timestamp;
     }
 
+    // Validation Blueprint: Attachment (JPG, PNG, WebP, or PDF base64 data URL)
+    function isValidAttachment(att) {
+      return att is map &&
+        att.keys().hasAll(['name', 'mimeType', 'dataUrl', 'sizeBytes']) &&
+        att.keys().hasOnly(['name', 'mimeType', 'dataUrl', 'sizeBytes']) &&
+        att.name is string && att.name.size() >= 1 && att.name.size() <= 160 &&
+        att.mimeType in ['image/jpeg', 'image/png', 'image/webp', 'application/pdf'] &&
+        att.dataUrl is string && att.dataUrl.size() >= 20 && att.dataUrl.size() <= 420000 &&
+        att.dataUrl.matches('^data:(image/(jpeg|png|webp)|application/pdf);base64,[A-Za-z0-9+/=]+$') &&
+        att.sizeBytes is int && att.sizeBytes >= 1 && att.sizeBytes <= 450000;
+    }
+
     // Validation Blueprint: Assignment
     function isValidAssignment(data, userId) {
       return data.keys().hasAll(['userId', 'title', 'subject', 'dueDate', 'status', 'createdAt', 'updatedAt']) &&
-        data.keys().hasOnly(['userId', 'title', 'subject', 'dueDate', 'status', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly([
+          'userId', 'title', 'subject', 'dueDate', 'status',
+          'questionText', 'questionFile', 'handwrittenSolution', 'linkedSolvedAssignmentId',
+          'createdAt', 'updatedAt'
+        ]) &&
         data.userId is string && data.userId == userId &&
         data.title is string && data.title.size() >= 1 && data.title.size() <= 160 &&
         data.subject is string && data.subject.size() >= 1 && data.subject.size() <= 80 &&
         isValidDateString(data.dueDate) &&
         data.status in ['Pending', 'Completed', 'Overdue'] &&
+        (!('questionText' in data) || (data.questionText is string && data.questionText.size() <= 6000)) &&
+        (!('questionFile' in data) || data.questionFile == null || isValidAttachment(data.questionFile)) &&
+        (!('handwrittenSolution' in data) || data.handwrittenSolution == null || isValidAttachment(data.handwrittenSolution)) &&
+        (!('linkedSolvedAssignmentId' in data) || data.linkedSolvedAssignmentId == null || isValidId(data.linkedSolvedAssignmentId)) &&
         data.createdAt is timestamp &&
         data.updatedAt is timestamp;
     }
@@ -117,6 +137,24 @@ service cloud.firestore {
         data.createdAt is timestamp;
     }
 
+    // Validation Blueprint: SolvedAssignment
+    function isValidSolvedAssignment(data, userId) {
+      return data.keys().hasAll(['userId', 'assignmentName', 'subject', 'question', 'solution', 'createdAt']) &&
+        data.keys().hasOnly(['userId', 'assignmentName', 'subject', 'question', 'solution', 'createdAt']) &&
+        data.userId is string && data.userId == userId &&
+        data.assignmentName is string && data.assignmentName.size() >= 1 && data.assignmentName.size() <= 160 &&
+        data.subject is string && data.subject.size() >= 1 && data.subject.size() <= 80 &&
+        data.question is string && data.question.size() >= 1 && data.question.size() <= 4000 &&
+        data.solution is map &&
+        data.solution.keys().hasAll(['finalAnswer', 'steps']) &&
+        data.solution.keys().hasOnly(['title', 'finalAnswer', 'steps']) &&
+        (!('title' in data.solution) || (data.solution.title is string && data.solution.title.size() <= 200)) &&
+        data.solution.finalAnswer is string && data.solution.finalAnswer.size() >= 1 && data.solution.finalAnswer.size() <= 2000 &&
+        data.solution.steps is list && data.solution.steps.size() >= 1 && data.solution.steps.size() <= 15 &&
+        data.solution.steps[0] is map &&
+        data.createdAt is timestamp;
+    }
+
     // Student Profile Document
     match /users/{userId} {
       allow get: if isValidId(userId) && isOwner(userId);
@@ -152,10 +190,24 @@ service cloud.firestore {
           incoming().userId == existing().userId &&
           incoming().createdAt == existing().createdAt &&
           incoming().updatedAt == request.time &&
-          existing().status != 'Completed' &&
           (
-            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']) ||
-            incoming().diff(existing()).affectedKeys().hasOnly(['title', 'subject', 'dueDate', 'status', 'updatedAt'])
+            (
+              existing().status != 'Completed' &&
+              (
+                incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']) ||
+                incoming().diff(existing()).affectedKeys().hasOnly([
+                  'title', 'subject', 'dueDate', 'status',
+                  'questionText', 'questionFile', 'handwrittenSolution', 'linkedSolvedAssignmentId',
+                  'updatedAt'
+                ])
+              )
+            ) ||
+            (
+              incoming().status == existing().status &&
+              incoming().diff(existing()).affectedKeys().hasOnly([
+                'questionText', 'questionFile', 'handwrittenSolution', 'linkedSolvedAssignmentId', 'updatedAt'
+              ])
+            )
           );
         allow delete: if isValidId(userId) && isValidId(assignmentId) && isOwner(userId);
       }
@@ -213,6 +265,18 @@ service cloud.firestore {
           incoming().createdAt == request.time;
         allow update: if false;
         allow delete: if isValidId(userId) && isValidId(itemId) && isOwner(userId);
+      }
+
+      // Named Solved Assignments Subcollection
+      match /solvedAssignments/{solvedId} {
+        allow get: if isValidId(userId) && isValidId(solvedId) && isOwner(userId);
+        allow list: if isOwner(userId) && resource.data.userId == request.auth.uid;
+        allow create: if isValidId(userId) && isValidId(solvedId) &&
+          isOwner(userId) &&
+          isValidSolvedAssignment(incoming(), userId) &&
+          incoming().createdAt == request.time;
+        allow update: if false;
+        allow delete: if isValidId(userId) && isValidId(solvedId) && isOwner(userId);
       }
     }
   }
