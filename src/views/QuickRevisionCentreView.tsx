@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import { useWorkspace } from '../context/WorkspaceContext';
 import { RevisionItem, RevisionToolType } from '../types';
+import { generateRevisionMaterial } from '../lib/gemini';
 
 interface McqQuestion {
   question: string;
@@ -42,12 +43,10 @@ export const QuickRevisionCentreView: React.FC = () => {
     awardXp,
   } = useWorkspace();
 
-  const firstName = (user?.displayName || profile.displayName || 'Shuvo').split(' ')[0];
+  const firstName = (user?.displayName || profile.displayName || 'Student').split(' ')[0];
   const [activeTab, setActiveTab] = useState<'tools' | 'folder'>(revisionInitialTab);
   const [selectedTool, setSelectedTool] = useState<RevisionToolType>(revisionInitialTool);
-  const [topicInput, setTopicInput] = useState(
-    'Thermodynamics: First and Second Laws, Entropy, and Heat Engines'
-  );
+  const [topicInput, setTopicInput] = useState('');
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -95,35 +94,49 @@ export const QuickRevisionCentreView: React.FC = () => {
     setSavedNotice(false);
 
     try {
-      const res = await fetch('/api/ai/revise', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ tool, input: topicInput.trim() }),
+      const data = await generateRevisionMaterial({
+        tool,
+        input: topicInput.trim(),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Failed to generate revision material.');
 
-      setResultTopic(data.topic || topicInput.trim().slice(0, 60));
+      setResultTopic(
+        typeof data.topic === 'string' && data.topic
+          ? data.topic
+          : topicInput.trim().slice(0, 60)
+      );
 
       if (tool === 'notes') {
-        setNotesData(Array.isArray(data.sections) ? data.sections : []);
+        setNotesData(
+          Array.isArray(data.sections)
+            ? (data.sections as Array<{ heading: string; points: string[] }>)
+            : []
+        );
       } else if (tool === 'questions') {
-        setQuestionsData(Array.isArray(data.questions) ? data.questions : []);
+        setQuestionsData(
+          Array.isArray(data.questions)
+            ? (data.questions as Array<{ question: string; difficulty: string; keyPoints: string }>)
+            : []
+        );
       } else if (tool === 'mcq') {
-        setMcqData(Array.isArray(data.mcqs) ? data.mcqs : []);
+        setMcqData(Array.isArray(data.mcqs) ? (data.mcqs as McqQuestion[]) : []);
         setMcqAnswers({});
         setMcqXpClaimed(false);
       } else if (tool === 'flashcards') {
-        setFlashcardsData(Array.isArray(data.flashcards) ? data.flashcards : []);
+        setFlashcardsData(
+          Array.isArray(data.flashcards) ? (data.flashcards as Flashcard[]) : []
+        );
         setCardIndex(0);
         setCardFlipped(false);
         setShowHint(false);
       } else if (tool === 'summary') {
         setSummaryData({
-          summaryText: data.summaryText || '',
-          takeaways: Array.isArray(data.takeaways) ? data.takeaways : [],
-          mustRememberFormula: data.mustRememberFormula || '',
-          fiveMinChecklist: Array.isArray(data.fiveMinChecklist) ? data.fiveMinChecklist : [],
+          summaryText: typeof data.summaryText === 'string' ? data.summaryText : '',
+          takeaways: Array.isArray(data.takeaways) ? (data.takeaways as string[]) : [],
+          mustRememberFormula:
+            typeof data.mustRememberFormula === 'string' ? data.mustRememberFormula : '',
+          fiveMinChecklist: Array.isArray(data.fiveMinChecklist)
+            ? (data.fiveMinChecklist as string[])
+            : [],
         });
       }
     } catch (err) {

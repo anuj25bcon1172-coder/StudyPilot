@@ -2,6 +2,15 @@ export type ViewId = 'home' | 'dashboard' | 'assignments' | 'solver' | 'assistan
 
 export type AssignmentStatus = 'Pending' | 'Completed' | 'Overdue';
 
+export type AttachmentMimeType = 'image/jpeg' | 'image/png' | 'image/webp' | 'application/pdf';
+
+export interface AssignmentAttachment {
+  name: string;
+  mimeType: AttachmentMimeType;
+  dataUrl: string;
+  sizeBytes: number;
+}
+
 export interface Assignment {
   id: string;
   userId: string;
@@ -9,6 +18,10 @@ export interface Assignment {
   subject: string;
   dueDate: string; // YYYY-MM-DD
   status: AssignmentStatus;
+  questionText?: string;
+  questionFile?: AssignmentAttachment | null;
+  handwrittenSolution?: AssignmentAttachment | null;
+  linkedSolvedAssignmentId?: string | null;
   createdAt?: string;
   updatedAt?: string;
 }
@@ -47,6 +60,22 @@ export interface SavedSolution {
   title?: string;
   finalAnswer: string;
   steps: SolutionStep[];
+  createdAt?: string;
+}
+
+export interface SolvedAssignmentSolution {
+  title?: string;
+  finalAnswer: string;
+  steps: SolutionStep[];
+}
+
+export interface SolvedAssignment {
+  id: string;
+  userId: string;
+  assignmentName: string;
+  subject: string;
+  question: string;
+  solution: SolvedAssignmentSolution;
   createdAt?: string;
 }
 

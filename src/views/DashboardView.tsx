@@ -19,6 +19,7 @@ import {
   Loader2,
 } from 'lucide-react';
 import { useWorkspace } from '../context/WorkspaceContext';
+import { runLanguageTutorSession } from '../lib/gemini';
 
 export const DashboardView: React.FC = () => {
   const {
@@ -88,17 +89,11 @@ export const DashboardView: React.FC = () => {
     setTutorLoading(true);
     setTutorError('');
     try {
-      const res = await fetch('/api/ai/language-tutor', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          prompt: promptToSend,
-          targetLanguage: profile.languageTarget,
-        }),
+      const reply = await runLanguageTutorSession({
+        prompt: promptToSend,
+        targetLanguage: profile.languageTarget,
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Unable to reach Language Tutor.');
-      setTutorReply(data.reply);
+      setTutorReply(reply);
       setTutorPrompt('');
       await awardXp(10);
     } catch (err) {
@@ -657,33 +652,39 @@ export const DashboardView: React.FC = () => {
             )}
 
             <div className="space-y-2.5">
-              {timelineEvents.map((evt) => {
-                const themeClass =
-                  evt.colorTheme === 'emerald'
-                    ? 'bg-[#E6F8F4] text-[#0D6E59]'
-                    : evt.colorTheme === 'purple'
-                    ? 'bg-[#F1EFFE] text-[#4C3DC2]'
-                    : 'bg-rose-50 text-rose-900';
-                return (
-                  <div
-                    key={evt.id}
-                    className={`group flex items-center justify-between px-3.5 py-2.5 rounded-xl ${themeClass}`}
-                  >
-                    <div className="min-w-0">
-                      <p className="text-xs font-semibold truncate">{evt.title}</p>
-                      <p className="text-[11px] opacity-75 tabular-nums mt-0.5">{evt.time}</p>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => deleteTimelineEvent(evt.id)}
-                      aria-label={`Delete ${evt.title}`}
-                      className="opacity-0 group-hover:opacity-100 p-1 rounded-md hover:bg-black/5 transition-opacity cursor-pointer"
+              {timelineEvents.length === 0 ? (
+                <p className="text-xs text-[#8C93A8] py-4 text-center">
+                  No scheduled events yet. Click + to add a study block.
+                </p>
+              ) : (
+                timelineEvents.map((evt) => {
+                  const themeClass =
+                    evt.colorTheme === 'emerald'
+                      ? 'bg-[#E6F8F4] text-[#0D6E59]'
+                      : evt.colorTheme === 'purple'
+                      ? 'bg-[#F1EFFE] text-[#4C3DC2]'
+                      : 'bg-rose-50 text-rose-900';
+                  return (
+                    <div
+                      key={evt.id}
+                      className={`group flex items-center justify-between px-3.5 py-2.5 rounded-xl ${themeClass}`}
                     >
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
-                );
-              })}
+                      <div className="min-w-0">
+                        <p className="text-xs font-semibold truncate">{evt.title}</p>
+                        <p className="text-[11px] opacity-75 tabular-nums mt-0.5">{evt.time}</p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => deleteTimelineEvent(evt.id)}
+                        aria-label={`Delete ${evt.title}`}
+                        className="opacity-0 group-hover:opacity-100 p-1 rounded-md hover:bg-black/5 transition-opacity cursor-pointer"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  );
+                })
+              )}
             </div>
           </div>
         </div>

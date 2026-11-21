@@ -1,21 +1,25 @@
-import React, { createContext, useContext, useEffect, useState, useCallback } from 'react';
+import React, { createContext, useContext, useEffect, useRef, useState, useCallback } from 'react';
 import {
   User,
+  browserLocalPersistence,
+  getRedirectResult,
   onAuthStateChanged,
+  setPersistence,
   signInWithPopup,
+  signInWithRedirect,
   signOut,
 } from 'firebase/auth';
 import {
   collection,
   deleteDoc,
+  deleteField,
   doc,
-  getDoc,
   onSnapshot,
-  orderBy,
   query,
   serverTimestamp,
   setDoc,
   updateDoc,
+  where,
   writeBatch,
 } from 'firebase/firestore';
 import {
@@ -28,226 +32,68 @@ import {
 } from '../lib/firebase';
 import {
   Assignment,
+  AssignmentAttachment,
   AssignmentStatus,
   Goal,
   RevisionItem,
   RevisionToolType,
   SavedSolution,
+  SolvedAssignment,
+  SolvedAssignmentSolution,
   StudentProfile,
   TimelineEvent,
   ViewId,
 } from '../types';
 
-const STORAGE_KEY = 'sturio_workspace_v1';
+const LEGACY_STORAGE_KEY = 'sturio_workspace_v1';
 
-const DEFAULT_PROFILE: StudentProfile = {
-  uid: 'local-student',
-  displayName: 'Shuvo',
-  level: 20,
-  xp: 150,
-  streakDays: 2,
+const EMPTY_PROFILE: StudentProfile = {
+  uid: '',
+  displayName: 'Student',
+  level: 1,
+  xp: 0,
+  streakDays: 0,
   languageTarget: 'Academic English & French',
-  algebraProgress: 76,
-  linearProgress: 75,
-  quadraticProgress: 25,
+  algebraProgress: 0,
+  linearProgress: 0,
+  quadraticProgress: 0,
 };
 
-function getTodayIso(): string {
-  const now = new Date();
-  const y = now.getFullYear();
-  const m = String(now.getMonth() + 1).padStart(2, '0');
-  const d = String(now.getDate()).padStart(2, '0');
-  return `${y}-${m}-${d}`;
-}
+function formatAuthError(err: unknown): string {
+  const code =
+    typeof err === 'object' && err !== null && 'code' in err
+      ? String((err as { code?: unknown }).code || '')
+      : '';
+  const hostname = typeof window !== 'undefined' ? window.location.hostname : 'this domain';
 
-function getRelativeIso(offsetDays: number): string {
-  const dt = new Date();
-  dt.setDate(dt.getDate() + offsetDays);
-  const y = dt.getFullYear();
-  const m = String(dt.getMonth() + 1).padStart(2, '0');
-  const d = String(dt.getDate()).padStart(2, '0');
-  return `${y}-${m}-${d}`;
-}
-
-const DEFAULT_ASSIGNMENTS: Assignment[] = [
-  {
-    id: 'assign-1',
-    userId: 'local-student',
-    title: 'Math Problem Set — Differential Equations',
-    subject: 'Mathematics',
-    dueDate: getRelativeIso(1),
-    status: 'Pending',
-  },
-  {
-    id: 'assign-2',
-    userId: 'local-student',
-    title: 'Physics Lab Report — Wave Optics',
-    subject: 'Physics',
-    dueDate: getRelativeIso(2),
-    status: 'Pending',
-  },
-  {
-    id: 'assign-3',
-    userId: 'local-student',
-    title: 'History Essay — Industrial Policy',
-    subject: 'History',
-    dueDate: getRelativeIso(-1),
-    status: 'Completed',
-  },
-  {
-    id: 'assign-4',
-    userId: 'local-student',
-    title: 'Chemistry Worksheet — Stoichiometry',
-    subject: 'Chemistry',
-    dueDate: getRelativeIso(-2),
-    status: 'Completed',
-  },
-  {
-    id: 'assign-5',
-    userId: 'local-student',
-    title: 'English Literature Analysis',
-    subject: 'Literature',
-    dueDate: getRelativeIso(-3),
-    status: 'Overdue',
-  },
-  {
-    id: 'assign-6',
-    userId: 'local-student',
-    title: 'Data Structures — Binary Search Trees',
-    subject: 'Computer Science',
-    dueDate: getRelativeIso(3),
-    status: 'Pending',
-  },
-  {
-    id: 'assign-7',
-    userId: 'local-student',
-    title: 'Linear Algebra Eigenvalues Quiz Prep',
-    subject: 'Mathematics',
-    dueDate: getRelativeIso(4),
-    status: 'Pending',
-  },
-  {
-    id: 'assign-8',
-    userId: 'local-student',
-    title: 'Microeconomics Elasticity Brief',
-    subject: 'Economics',
-    dueDate: getRelativeIso(-1),
-    status: 'Completed',
-  },
-];
-
-const DEFAULT_GOALS: Goal[] = [
-  { id: 'goal-1', userId: 'local-student', title: 'Make Summary Note', completed: false },
-  { id: 'goal-2', userId: 'local-student', title: 'Chemistry Quiz', completed: true },
-  { id: 'goal-3', userId: 'local-student', title: 'English Learning', completed: false },
-];
-
-const DEFAULT_TIMELINE: TimelineEvent[] = [
-  {
-    id: 'evt-1',
-    userId: 'local-student',
-    title: 'Study Group Meeting',
-    time: '15:30',
-    date: getTodayIso(),
-    colorTheme: 'rose',
-  },
-  {
-    id: 'evt-2',
-    userId: 'local-student',
-    title: 'Calculus Practice Review',
-    time: '19:30',
-    date: getTodayIso(),
-    colorTheme: 'emerald',
-  },
-];
-
-const DEFAULT_SOLUTIONS: SavedSolution[] = [
-  {
-    id: 'sol-1',
-    userId: 'local-student',
-    question: 'Solve the differential equation dy/dx + 2y = x with the initial condition y(0) = 1.',
-    subject: 'Differential Equations',
-    title: 'First-Order Linear ODE with Integrating Factor',
-    steps: [
-      {
-        stepNumber: 1,
-        title: 'Find the integrating factor',
-        explanation: 'The equation is in standard linear form $\\frac{dy}{dx} + P(x)y = Q(x)$ where $P(x) = 2$ and $Q(x) = x$.',
-        formula: 'IF = e^{\\int P(x)\\,dx} = e^{\\int 2\\,dx} = e^{2x}',
-      },
-      {
-        stepNumber: 2,
-        title: 'Multiply through by the integrating factor',
-        explanation: 'Multiplying both sides by $e^{2x}$ turns the left-hand side into an exact product derivative.',
-        formula: '\\frac{d}{dx}\\left(y e^{2x}\\right) = x e^{2x}',
-      },
-      {
-        stepNumber: 3,
-        title: 'Integrate both sides and apply initial condition',
-        explanation: 'Using integration by parts on $\\int x e^{2x}\\,dx$ gives $\\frac{x}{2}e^{2x} - \\frac{1}{4}e^{2x} + C$. Applying $y(0) = 1$ yields $C = \\frac{5}{4}$.',
-        formula: 'y(x) = \\frac{x}{2} - \\frac{1}{4} + \\frac{5}{4}e^{-2x}',
-      },
-    ],
-    finalAnswer: '$y(x) = \\frac{x}{2} - \\frac{1}{4} + \\frac{5}{4}e^{-2x}$',
-  },
-];
-
-const DEFAULT_REVISION: RevisionItem[] = [
-  {
-    id: 'rev-1',
-    userId: 'local-student',
-    toolType: 'notes',
-    topic: 'Pythagorean Theorem & Right Triangles',
-    summaryText: 'Core relationship between legs and hypotenuse of any Euclidean right-angled triangle.',
-    items: [
-      {
-        heading: 'Fundamental Identity',
-        points: ['In a right triangle, the square of the hypotenuse equals the sum of the squares of the two legs: a^2 + b^2 = c^2.'],
-      },
-    ],
-  },
-];
-
-interface LocalStore {
-  profile: StudentProfile;
-  assignments: Assignment[];
-  goals: Goal[];
-  timelineEvents: TimelineEvent[];
-  savedSolutions: SavedSolution[];
-  revisionItems: RevisionItem[];
-}
-
-function loadLocalStore(): LocalStore {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      return {
-        profile: { ...DEFAULT_PROFILE, ...(parsed.profile || {}) },
-        assignments: Array.isArray(parsed.assignments) ? parsed.assignments : DEFAULT_ASSIGNMENTS,
-        goals: Array.isArray(parsed.goals) ? parsed.goals : DEFAULT_GOALS,
-        timelineEvents: Array.isArray(parsed.timelineEvents) ? parsed.timelineEvents : DEFAULT_TIMELINE,
-        savedSolutions: Array.isArray(parsed.savedSolutions) ? parsed.savedSolutions : DEFAULT_SOLUTIONS,
-        revisionItems: Array.isArray(parsed.revisionItems) ? parsed.revisionItems : DEFAULT_REVISION,
-      };
-    }
-  } catch {
-    // Fallback to defaults
+  switch (code) {
+    case 'auth/unauthorized-domain':
+      return `Google Sign-In is blocked on "${hostname}". Add "${hostname}" in Firebase Console → Authentication → Settings → Authorized domains.`;
+    case 'auth/popup-blocked':
+      return 'Sign-in popup was blocked by your browser. Please allow popups for this site or try again.';
+    case 'auth/popup-closed-by-user':
+      return 'Google Sign-In window was closed before completing sign-in. Please try again.';
+    case 'auth/cancelled-popup-request':
+      return 'Another sign-in window is already open. Complete the active Google prompt or try again.';
+    case 'auth/network-request-failed':
+      return 'Network error while contacting Google Authentication. Check your internet connection and retry.';
+    case 'auth/account-exists-with-different-credential':
+      return 'An account already exists with this email under a different sign-in provider.';
+    case 'auth/operation-not-allowed':
+      return 'Google Sign-In is not enabled in Firebase Authentication for this project.';
+    default:
+      if (err instanceof Error && err.message.trim()) {
+        return err.message;
+      }
+      return 'Unable to sign in with Google right now. Please try again.';
   }
-  return {
-    profile: DEFAULT_PROFILE,
-    assignments: DEFAULT_ASSIGNMENTS,
-    goals: DEFAULT_GOALS,
-    timelineEvents: DEFAULT_TIMELINE,
-    savedSolutions: DEFAULT_SOLUTIONS,
-    revisionItems: DEFAULT_REVISION,
-  };
 }
 
 interface WorkspaceContextValue {
   user: User | null;
   authLoading: boolean;
   syncError: string | null;
+  clearSyncError: () => void;
   signInWithGoogle: () => Promise<boolean>;
   signOutUser: () => Promise<void>;
   activeView: ViewId;
@@ -258,13 +104,40 @@ interface WorkspaceContextValue {
   setRevisionInitialTab: (tab: 'tools' | 'folder') => void;
   isAddAssignmentOpen: boolean;
   setIsAddAssignmentOpen: (open: boolean) => void;
+  selectedSolvedAssignment: SolvedAssignment | null;
+  setSelectedSolvedAssignment: (item: SolvedAssignment | null) => void;
+  pendingSolverPrompt: { question: string; subject: string } | null;
+  setPendingSolverPrompt: (prompt: { question: string; subject: string } | null) => void;
   profile: StudentProfile;
   assignments: Assignment[];
   goals: Goal[];
   timelineEvents: TimelineEvent[];
   savedSolutions: SavedSolution[];
+  solvedAssignments: SolvedAssignment[];
   revisionItems: RevisionItem[];
-  addAssignment: (input: { title: string; subject: string; dueDate: string; status: AssignmentStatus }) => Promise<void>;
+  addAssignment: (input: {
+    title: string;
+    subject: string;
+    dueDate: string;
+    status: AssignmentStatus;
+    questionText?: string;
+    questionFile?: AssignmentAttachment | null;
+    handwrittenSolution?: AssignmentAttachment | null;
+    linkedSolvedAssignmentId?: string | null;
+  }) => Promise<void>;
+  updateAssignmentDetails: (
+    id: string,
+    updates: {
+      title?: string;
+      subject?: string;
+      dueDate?: string;
+      status?: AssignmentStatus;
+      questionText?: string;
+      questionFile?: AssignmentAttachment | null;
+      handwrittenSolution?: AssignmentAttachment | null;
+      linkedSolvedAssignmentId?: string | null;
+    }
+  ) => Promise<void>;
   updateAssignmentStatus: (id: string, status: AssignmentStatus) => Promise<void>;
   deleteAssignment: (id: string) => Promise<void>;
   addGoal: (title: string) => Promise<void>;
@@ -274,6 +147,13 @@ interface WorkspaceContextValue {
   deleteTimelineEvent: (id: string) => Promise<void>;
   saveSolution: (sol: Omit<SavedSolution, 'id' | 'userId' | 'createdAt'>) => Promise<void>;
   deleteSolution: (id: string) => Promise<void>;
+  saveSolvedAssignment: (input: {
+    assignmentName: string;
+    subject: string;
+    question: string;
+    solution: SolvedAssignmentSolution;
+  }) => Promise<SolvedAssignment>;
+  deleteSolvedAssignment: (id: string) => Promise<void>;
   saveRevisionItem: (item: Omit<RevisionItem, 'id' | 'userId' | 'createdAt'>) => Promise<void>;
   deleteRevisionItem: (id: string) => Promise<void>;
   awardXp: (amount: number) => Promise<void>;
@@ -302,10 +182,10 @@ function getViewFromPath(pathname: string): ViewId {
 const WorkspaceContext = createContext<WorkspaceContextValue | null>(null);
 
 export const WorkspaceProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const initialLocal = loadLocalStore();
   const [user, setUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [syncError, setSyncError] = useState<string | null>(null);
+  const clearSyncError = useCallback(() => setSyncError(null), []);
 
   const [activeView, setActiveViewState] = useState<ViewId>(() =>
     typeof window !== 'undefined' ? getViewFromPath(window.location.pathname) : 'home'
@@ -348,151 +228,118 @@ export const WorkspaceProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   const [revisionInitialTool, setRevisionInitialTool] = useState<RevisionToolType>('notes');
   const [revisionInitialTab, setRevisionInitialTab] = useState<'tools' | 'folder'>('tools');
   const [isAddAssignmentOpen, setIsAddAssignmentOpen] = useState(false);
+  const [selectedSolvedAssignment, setSelectedSolvedAssignment] = useState<SolvedAssignment | null>(null);
+  const [pendingSolverPrompt, setPendingSolverPrompt] = useState<{
+    question: string;
+    subject: string;
+  } | null>(null);
 
-  const [profile, setProfile] = useState<StudentProfile>(initialLocal.profile);
-  const [assignments, setAssignments] = useState<Assignment[]>(initialLocal.assignments);
-  const [goals, setGoals] = useState<Goal[]>(initialLocal.goals);
-  const [timelineEvents, setTimelineEvents] = useState<TimelineEvent[]>(initialLocal.timelineEvents);
-  const [savedSolutions, setSavedSolutions] = useState<SavedSolution[]>(initialLocal.savedSolutions);
-  const [revisionItems, setRevisionItems] = useState<RevisionItem[]>(initialLocal.revisionItems);
+  const [profile, setProfile] = useState<StudentProfile>(EMPTY_PROFILE);
+  const [assignments, setAssignments] = useState<Assignment[]>([]);
+  const [goals, setGoals] = useState<Goal[]>([]);
+  const [timelineEvents, setTimelineEvents] = useState<TimelineEvent[]>([]);
+  const [savedSolutions, setSavedSolutions] = useState<SavedSolution[]>([]);
+  const [solvedAssignments, setSolvedAssignments] = useState<SolvedAssignment[]>([]);
+  const [revisionItems, setRevisionItems] = useState<RevisionItem[]>([]);
 
-  // Persist local state whenever unauthenticated
+  // Clear legacy unauthenticated local cache so zero dummy data persists across sessions
   useEffect(() => {
-    if (!user) {
-      try {
-        localStorage.setItem(
-          STORAGE_KEY,
-          JSON.stringify({
-            profile,
-            assignments,
-            goals,
-            timelineEvents,
-            savedSolutions,
-            revisionItems,
-          })
-        );
-      } catch {
-        // Ignore quota errors
-      }
+    try {
+      localStorage.removeItem(LEGACY_STORAGE_KEY);
+    } catch {
+      // Ignore storage access errors
     }
-  }, [user, profile, assignments, goals, timelineEvents, savedSolutions, revisionItems]);
+  }, []);
 
-  // Seed Firestore for newly authenticated users
-  const ensureUserSeeded = useCallback(async (uid: string, displayName: string) => {
+  const seedingUidsRef = useRef<Set<string>>(new Set());
+
+  // Initialize empty profile document in Firestore for newly authenticated users
+  const seedUserWorkspace = useCallback(async (uid: string, displayName: string) => {
     const profileRef = doc(db, 'users', uid);
     try {
-      const snap = await getDoc(profileRef);
-      if (!snap.exists()) {
-        const batch = writeBatch(db);
-        batch.set(profileRef, {
-          uid,
-          displayName: displayName.slice(0, 80) || 'Student',
-          level: 20,
-          xp: 150,
-          streakDays: 2,
-          languageTarget: 'Academic English & French',
-          algebraProgress: 76,
-          linearProgress: 75,
-          quadraticProgress: 25,
-          updatedAt: serverTimestamp(),
-        });
-
-        DEFAULT_ASSIGNMENTS.forEach((a) => {
-          batch.set(doc(db, 'users', uid, 'assignments', a.id), {
-            userId: uid,
-            title: a.title,
-            subject: a.subject,
-            dueDate: a.dueDate,
-            status: a.status,
-            createdAt: serverTimestamp(),
-            updatedAt: serverTimestamp(),
-          });
-        });
-
-        DEFAULT_GOALS.forEach((g) => {
-          batch.set(doc(db, 'users', uid, 'goals', g.id), {
-            userId: uid,
-            title: g.title,
-            completed: g.completed,
-            createdAt: serverTimestamp(),
-            updatedAt: serverTimestamp(),
-          });
-        });
-
-        DEFAULT_TIMELINE.forEach((evt) => {
-          batch.set(doc(db, 'users', uid, 'timelineEvents', evt.id), {
-            userId: uid,
-            title: evt.title,
-            time: evt.time,
-            date: evt.date,
-            colorTheme: evt.colorTheme,
-            createdAt: serverTimestamp(),
-          });
-        });
-
-        DEFAULT_SOLUTIONS.forEach((sol) => {
-          batch.set(doc(db, 'users', uid, 'savedSolutions', sol.id), {
-            userId: uid,
-            question: sol.question,
-            subject: sol.subject,
-            finalAnswer: sol.finalAnswer,
-            steps: sol.steps,
-            createdAt: serverTimestamp(),
-          });
-        });
-
-        await batch.commit();
-      }
+      await setDoc(profileRef, {
+        uid,
+        displayName: displayName.slice(0, 80) || 'Student',
+        level: 1,
+        xp: 0,
+        streakDays: 0,
+        languageTarget: 'Academic English & French',
+        algebraProgress: 0,
+        linearProgress: 0,
+        quadraticProgress: 0,
+        updatedAt: serverTimestamp(),
+      });
+      setSyncError(null);
     } catch (error) {
+      seedingUidsRef.current.delete(uid);
+      setSyncError(error instanceof Error ? error.message : 'Unable to initialize cloud profile.');
       handleFirestoreError(error, OperationType.WRITE, `users/${uid}`);
     }
   }, []);
 
-  // Auth listener + Firestore live subscriptions
+  // Auth listener + redirect completion + Firestore live subscriptions
   useEffect(() => {
     void testConnection();
+    void setPersistence(auth, browserLocalPersistence).catch(() => undefined);
+    void getRedirectResult(auth)
+      .then((result) => {
+        if (result?.user) {
+          setUser(result.user);
+          setSyncError(null);
+        }
+      })
+      .catch((err) => {
+        setSyncError(formatAuthError(err));
+      });
+
     let unsubProfile: (() => void) | undefined;
     let unsubAssignments: (() => void) | undefined;
     let unsubGoals: (() => void) | undefined;
     let unsubTimeline: (() => void) | undefined;
     let unsubSolutions: (() => void) | undefined;
+    let unsubSolvedAssignments: (() => void) | undefined;
     let unsubRevision: (() => void) | undefined;
 
-    const unsubAuth = onAuthStateChanged(auth, async (firebaseUser) => {
-      setUser(firebaseUser);
-      setAuthLoading(false);
-
+    const unsubAuth = onAuthStateChanged(auth, (firebaseUser) => {
       unsubProfile?.();
       unsubAssignments?.();
       unsubGoals?.();
       unsubTimeline?.();
       unsubSolutions?.();
+      unsubSolvedAssignments?.();
       unsubRevision?.();
 
+      // Always reset in-memory collections cleanly on auth changes so no stale data leaks
+      setAssignments([]);
+      setGoals([]);
+      setTimelineEvents([]);
+      setSavedSolutions([]);
+      setSolvedAssignments([]);
+      setRevisionItems([]);
+
+      setUser(firebaseUser);
+      setAuthLoading(false);
+
       if (!firebaseUser) {
-        const local = loadLocalStore();
-        setProfile(local.profile);
-        setAssignments(local.assignments);
-        setGoals(local.goals);
-        setTimelineEvents(local.timelineEvents);
-        setSavedSolutions(local.savedSolutions);
-        setRevisionItems(local.revisionItems);
+        setProfile(EMPTY_PROFILE);
         return;
       }
 
-      try {
-        await ensureUserSeeded(firebaseUser.uid, firebaseUser.displayName || 'Student');
-      } catch (err) {
-        setSyncError(err instanceof Error ? err.message : 'Unable to initialize cloud profile.');
-        return;
-      }
-
+      setSyncError(null);
       const uid = firebaseUser.uid;
+      setProfile({
+        ...EMPTY_PROFILE,
+        uid,
+        displayName: firebaseUser.displayName || 'Student',
+      });
+
       unsubProfile = onSnapshot(
         doc(db, 'users', uid),
+        { includeMetadataChanges: true },
         (snap) => {
           if (snap.exists()) {
             const d = snap.data();
+            setSyncError(null);
             setProfile({
               uid: d.uid,
               displayName: d.displayName,
@@ -504,75 +351,93 @@ export const WorkspaceProvider: React.FC<{ children: React.ReactNode }> = ({ chi
               linearProgress: d.linearProgress,
               quadraticProgress: d.quadraticProgress,
             });
+          } else if (!snap.metadata.fromCache && !seedingUidsRef.current.has(uid)) {
+            seedingUidsRef.current.add(uid);
+            void seedUserWorkspace(uid, firebaseUser.displayName || 'Student');
           }
         },
-        (error) => handleFirestoreError(error, OperationType.GET, `users/${uid}`)
+        (error) => {
+          setSyncError(error.message);
+          handleFirestoreError(error, OperationType.GET, `users/${uid}`);
+        }
       );
 
       unsubAssignments = onSnapshot(
-        query(collection(db, 'users', uid, 'assignments'), orderBy('dueDate', 'asc')),
+        query(collection(db, 'users', uid, 'assignments'), where('userId', '==', uid)),
         (snap) => {
-          setAssignments(
-            snap.docs.map((docSnap) => {
-              const d = docSnap.data();
-              return {
-                id: docSnap.id,
-                userId: d.userId,
-                title: d.title,
-                subject: d.subject,
-                dueDate: d.dueDate,
-                status: d.status,
-              };
-            })
-          );
+          const items = snap.docs.map((docSnap) => {
+            const d = docSnap.data();
+            return {
+              id: docSnap.id,
+              userId: d.userId,
+              title: d.title,
+              subject: d.subject,
+              dueDate: d.dueDate,
+              status: d.status,
+              questionText: typeof d.questionText === 'string' ? d.questionText : undefined,
+              questionFile: d.questionFile ?? null,
+              handwrittenSolution: d.handwrittenSolution ?? null,
+              linkedSolvedAssignmentId:
+                typeof d.linkedSolvedAssignmentId === 'string'
+                  ? d.linkedSolvedAssignmentId
+                  : null,
+            } as Assignment;
+          });
+          items.sort((a, b) => (a.dueDate || '').localeCompare(b.dueDate || ''));
+          setAssignments(items);
         },
         (error) => handleFirestoreError(error, OperationType.LIST, `users/${uid}/assignments`)
       );
 
       unsubGoals = onSnapshot(
-        query(collection(db, 'users', uid, 'goals'), orderBy('createdAt', 'asc')),
+        query(collection(db, 'users', uid, 'goals'), where('userId', '==', uid)),
         (snap) => {
-          setGoals(
-            snap.docs.map((docSnap) => {
+          const items = snap.docs
+            .map((docSnap) => {
               const d = docSnap.data();
+              const ms = typeof d.createdAt?.toMillis === 'function' ? d.createdAt.toMillis() : 0;
               return {
                 id: docSnap.id,
                 userId: d.userId,
                 title: d.title,
                 completed: Boolean(d.completed),
+                _ms: ms,
               };
             })
-          );
+            .sort((a, b) => a._ms - b._ms)
+            .map(({ _ms: _, ...rest }) => rest as Goal);
+          setGoals(items);
         },
         (error) => handleFirestoreError(error, OperationType.LIST, `users/${uid}/goals`)
       );
 
       unsubTimeline = onSnapshot(
-        query(collection(db, 'users', uid, 'timelineEvents'), orderBy('time', 'asc')),
+        query(collection(db, 'users', uid, 'timelineEvents'), where('userId', '==', uid)),
         (snap) => {
-          setTimelineEvents(
-            snap.docs.map((docSnap) => {
-              const d = docSnap.data();
-              return {
-                id: docSnap.id,
-                userId: d.userId,
-                title: d.title,
-                time: d.time,
-                date: d.date,
-                colorTheme: d.colorTheme,
-              };
-            })
-          );
+          const items = snap.docs.map((docSnap) => {
+            const d = docSnap.data();
+            return {
+              id: docSnap.id,
+              userId: d.userId,
+              title: d.title,
+              time: d.time,
+              date: d.date,
+              colorTheme: d.colorTheme,
+            } as TimelineEvent;
+          });
+          items.sort((a, b) => (a.time || '').localeCompare(b.time || ''));
+          setTimelineEvents(items);
         },
         (error) => handleFirestoreError(error, OperationType.LIST, `users/${uid}/timelineEvents`)
       );
 
       unsubSolutions = onSnapshot(
-        query(collection(db, 'users', uid, 'savedSolutions'), orderBy('createdAt', 'desc')),
+        query(collection(db, 'users', uid, 'savedSolutions'), where('userId', '==', uid)),
         (snap) => {
-          setSavedSolutions(
-            snap.docs.map((docSnap) => {
+          const items = snap.docs
+            .map((docSnap) => {
               const d = docSnap.data();
+              const ms = typeof d.createdAt?.toMillis === 'function' ? d.createdAt.toMillis() : 0;
               return {
                 id: docSnap.id,
                 userId: d.userId,
@@ -580,19 +445,23 @@ export const WorkspaceProvider: React.FC<{ children: React.ReactNode }> = ({ chi
                 subject: d.subject,
                 finalAnswer: d.finalAnswer,
                 steps: Array.isArray(d.steps) ? d.steps : [],
+                _ms: ms,
               };
             })
-          );
+            .sort((a, b) => b._ms - a._ms)
+            .map(({ _ms: _, ...rest }) => rest as SavedSolution);
+          setSavedSolutions(items);
         },
         (error) => handleFirestoreError(error, OperationType.LIST, `users/${uid}/savedSolutions`)
       );
 
       unsubRevision = onSnapshot(
-        query(collection(db, 'users', uid, 'revisionItems'), orderBy('createdAt', 'desc')),
+        query(collection(db, 'users', uid, 'revisionItems'), where('userId', '==', uid)),
         (snap) => {
-          setRevisionItems(
-            snap.docs.map((docSnap) => {
+          const items = snap.docs
+            .map((docSnap) => {
               const d = docSnap.data();
+              const ms = typeof d.createdAt?.toMillis === 'function' ? d.createdAt.toMillis() : 0;
               return {
                 id: docSnap.id,
                 userId: d.userId,
@@ -600,11 +469,51 @@ export const WorkspaceProvider: React.FC<{ children: React.ReactNode }> = ({ chi
                 topic: d.topic,
                 summaryText: d.summaryText,
                 items: Array.isArray(d.items) ? d.items : [],
+                _ms: ms,
               };
             })
-          );
+            .sort((a, b) => b._ms - a._ms)
+            .map(({ _ms: _, ...rest }) => rest as RevisionItem);
+          setRevisionItems(items);
         },
         (error) => handleFirestoreError(error, OperationType.LIST, `users/${uid}/revisionItems`)
+      );
+
+      unsubSolvedAssignments = onSnapshot(
+        query(collection(db, 'users', uid, 'solvedAssignments'), where('userId', '==', uid)),
+        (snap) => {
+          const items = snap.docs
+            .map((docSnap) => {
+              const d = docSnap.data();
+              const ms = typeof d.createdAt?.toMillis === 'function' ? d.createdAt.toMillis() : 0;
+              const iso =
+                typeof d.createdAt?.toDate === 'function'
+                  ? d.createdAt.toDate().toISOString()
+                  : undefined;
+              const sol = (d.solution && typeof d.solution === 'object' ? d.solution : {}) as Record<
+                string,
+                unknown
+              >;
+              return {
+                id: docSnap.id,
+                userId: d.userId,
+                assignmentName: d.assignmentName,
+                subject: d.subject,
+                question: d.question,
+                solution: {
+                  title: typeof sol.title === 'string' ? sol.title : undefined,
+                  finalAnswer: typeof sol.finalAnswer === 'string' ? sol.finalAnswer : '',
+                  steps: Array.isArray(sol.steps) ? sol.steps : [],
+                },
+                createdAt: iso,
+                _ms: ms,
+              };
+            })
+            .sort((a, b) => b._ms - a._ms)
+            .map(({ _ms: _, ...rest }) => rest as SolvedAssignment);
+          setSolvedAssignments(items);
+        },
+        (error) => handleFirestoreError(error, OperationType.LIST, `users/${uid}/solvedAssignments`)
       );
     });
 
@@ -615,22 +524,43 @@ export const WorkspaceProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       unsubGoals?.();
       unsubTimeline?.();
       unsubSolutions?.();
+      unsubSolvedAssignments?.();
       unsubRevision?.();
     };
-  }, [ensureUserSeeded]);
+  }, [seedUserWorkspace]);
 
   const signInWithGoogle = async (): Promise<boolean> => {
     setSyncError(null);
     try {
-      await signInWithPopup(auth, googleProvider);
+      const credential = await signInWithPopup(auth, googleProvider);
+      if (credential.user) {
+        setUser(credential.user);
+      }
       return true;
     } catch (err) {
-      setSyncError(err instanceof Error ? err.message : 'Google sign-in was cancelled or blocked.');
+      const code =
+        typeof err === 'object' && err !== null && 'code' in err
+          ? String((err as { code?: unknown }).code || '')
+          : '';
+      if (
+        code === 'auth/popup-blocked' ||
+        code === 'auth/operation-not-supported-in-this-environment'
+      ) {
+        try {
+          await signInWithRedirect(auth, googleProvider);
+          return true;
+        } catch (redirectErr) {
+          setSyncError(formatAuthError(redirectErr));
+          return false;
+        }
+      }
+      setSyncError(formatAuthError(err));
       return false;
     }
   };
 
   const signOutUser = async () => {
+    setSyncError(null);
     await signOut(auth);
   };
 
@@ -665,39 +595,146 @@ export const WorkspaceProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     subject: string;
     dueDate: string;
     status: AssignmentStatus;
+    questionText?: string;
+    questionFile?: AssignmentAttachment | null;
+    handwrittenSolution?: AssignmentAttachment | null;
+    linkedSolvedAssignmentId?: string | null;
   }) => {
     const id = `assign_${Date.now()}`;
     const cleanTitle = input.title.trim().slice(0, 160);
     const cleanSubject = input.subject.trim().slice(0, 80);
+    const cleanQuestionText = (input.questionText || '').trim().slice(0, 6000);
+
+    const newItem: Assignment = {
+      id,
+      userId: user ? user.uid : 'local-student',
+      title: cleanTitle,
+      subject: cleanSubject,
+      dueDate: input.dueDate,
+      status: input.status,
+      ...(cleanQuestionText ? { questionText: cleanQuestionText } : {}),
+      ...(input.questionFile ? { questionFile: input.questionFile } : {}),
+      ...(input.handwrittenSolution ? { handwrittenSolution: input.handwrittenSolution } : {}),
+      ...(input.linkedSolvedAssignmentId
+        ? { linkedSolvedAssignmentId: input.linkedSolvedAssignmentId }
+        : {}),
+    };
 
     if (!user) {
-      setAssignments((prev) => [
-        {
-          id,
-          userId: 'local-student',
-          title: cleanTitle,
-          subject: cleanSubject,
-          dueDate: input.dueDate,
-          status: input.status,
-        },
-        ...prev,
-      ]);
+      setAssignments((prev) => [newItem, ...prev]);
       return;
     }
 
     const path = `users/${user.uid}/assignments/${id}`;
+    const payload: Record<string, unknown> = {
+      userId: user.uid,
+      title: cleanTitle,
+      subject: cleanSubject,
+      dueDate: input.dueDate,
+      status: input.status,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    };
+    if (cleanQuestionText) payload.questionText = cleanQuestionText;
+    if (input.questionFile) payload.questionFile = input.questionFile;
+    if (input.handwrittenSolution) payload.handwrittenSolution = input.handwrittenSolution;
+    if (input.linkedSolvedAssignmentId) {
+      payload.linkedSolvedAssignmentId = input.linkedSolvedAssignmentId;
+    }
+
     try {
-      await setDoc(doc(db, 'users', user.uid, 'assignments', id), {
-        userId: user.uid,
-        title: cleanTitle,
-        subject: cleanSubject,
-        dueDate: input.dueDate,
-        status: input.status,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      });
+      await setDoc(doc(db, 'users', user.uid, 'assignments', id), payload);
     } catch (error) {
       handleFirestoreError(error, OperationType.CREATE, path);
+    }
+  };
+
+  const updateAssignmentDetails = async (
+    id: string,
+    updates: {
+      title?: string;
+      subject?: string;
+      dueDate?: string;
+      status?: AssignmentStatus;
+      questionText?: string;
+      questionFile?: AssignmentAttachment | null;
+      handwrittenSolution?: AssignmentAttachment | null;
+      linkedSolvedAssignmentId?: string | null;
+    }
+  ) => {
+    const existing = assignments.find((a) => a.id === id);
+    if (!existing) return;
+
+    const cleanQuestionText =
+      updates.questionText !== undefined ? updates.questionText.trim().slice(0, 6000) : undefined;
+
+    if (!user) {
+      setAssignments((prev) =>
+        prev.map((a) => {
+          if (a.id !== id) return a;
+          const next: Assignment = { ...a };
+          if (existing.status !== 'Completed') {
+            if (updates.title !== undefined) next.title = updates.title.trim().slice(0, 160) || a.title;
+            if (updates.subject !== undefined)
+              next.subject = updates.subject.trim().slice(0, 80) || a.subject;
+            if (updates.dueDate !== undefined) next.dueDate = updates.dueDate;
+            if (updates.status !== undefined) next.status = updates.status;
+          }
+          if (cleanQuestionText !== undefined) next.questionText = cleanQuestionText;
+          if (updates.questionFile !== undefined) next.questionFile = updates.questionFile;
+          if (updates.handwrittenSolution !== undefined) {
+            next.handwrittenSolution = updates.handwrittenSolution;
+          }
+          if (updates.linkedSolvedAssignmentId !== undefined) {
+            next.linkedSolvedAssignmentId = updates.linkedSolvedAssignmentId;
+          }
+          return next;
+        })
+      );
+      if (existing.status !== 'Completed' && updates.status === 'Completed') {
+        await awardXp(15);
+      }
+      return;
+    }
+
+    const path = `users/${user.uid}/assignments/${id}`;
+    const payload: Record<string, unknown> = {
+      updatedAt: serverTimestamp(),
+    };
+
+    const canEditCore = existing.status !== 'Completed';
+    if (canEditCore) {
+      if (updates.title !== undefined) payload.title = updates.title.trim().slice(0, 160) || existing.title;
+      if (updates.subject !== undefined)
+        payload.subject = updates.subject.trim().slice(0, 80) || existing.subject;
+      if (updates.dueDate !== undefined) payload.dueDate = updates.dueDate;
+      if (updates.status !== undefined) payload.status = updates.status;
+    }
+
+    if (cleanQuestionText !== undefined) {
+      payload.questionText = cleanQuestionText ? cleanQuestionText : deleteField();
+    }
+    if (updates.questionFile !== undefined) {
+      payload.questionFile = updates.questionFile ? updates.questionFile : deleteField();
+    }
+    if (updates.handwrittenSolution !== undefined) {
+      payload.handwrittenSolution = updates.handwrittenSolution
+        ? updates.handwrittenSolution
+        : deleteField();
+    }
+    if (updates.linkedSolvedAssignmentId !== undefined) {
+      payload.linkedSolvedAssignmentId = updates.linkedSolvedAssignmentId
+        ? updates.linkedSolvedAssignmentId
+        : deleteField();
+    }
+
+    try {
+      await updateDoc(doc(db, 'users', user.uid, 'assignments', id), payload);
+      if (canEditCore && updates.status === 'Completed') {
+        await awardXp(15);
+      }
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, path);
     }
   };
 
@@ -945,6 +982,87 @@ export const WorkspaceProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     }
   };
 
+  const saveSolvedAssignment = async (input: {
+    assignmentName: string;
+    subject: string;
+    question: string;
+    solution: SolvedAssignmentSolution;
+  }): Promise<SolvedAssignment> => {
+    const id = `solved_${Date.now()}`;
+    const cleanAssignmentName = input.assignmentName.trim().slice(0, 160);
+    if (!cleanAssignmentName) {
+      throw new Error('Please enter an Assignment Name before saving.');
+    }
+    const cleanSubject = input.subject.trim().slice(0, 80) || 'General';
+    const cleanQuestion = input.question.trim().slice(0, 4000) || 'Problem';
+    const cleanFinalAnswer = input.solution.finalAnswer.trim().slice(0, 2000) || 'Solved';
+    const cleanTitle = input.solution.title ? input.solution.title.trim().slice(0, 200) : '';
+    const normalizedSteps = input.solution.steps.slice(0, 15).map((step, idx) => ({
+      stepNumber: Number(step.stepNumber) || idx + 1,
+      title: String(step.title || `Step ${idx + 1}`).slice(0, 200),
+      explanation: String(step.explanation || '').slice(0, 4000),
+      formula: String(step.formula || '').slice(0, 2000),
+    }));
+    const safeSteps =
+      normalizedSteps.length > 0
+        ? normalizedSteps
+        : [
+            {
+              stepNumber: 1,
+              title: 'Solution Summary',
+              explanation: cleanFinalAnswer,
+              formula: '',
+            },
+          ];
+
+    const solutionPayload: SolvedAssignmentSolution = cleanTitle
+      ? { title: cleanTitle, finalAnswer: cleanFinalAnswer, steps: safeSteps }
+      : { finalAnswer: cleanFinalAnswer, steps: safeSteps };
+
+    const createdItem: SolvedAssignment = {
+      id,
+      userId: user ? user.uid : 'local-student',
+      assignmentName: cleanAssignmentName,
+      subject: cleanSubject,
+      question: cleanQuestion,
+      solution: solutionPayload,
+      createdAt: new Date().toISOString(),
+    };
+
+    if (!user) {
+      setSolvedAssignments((prev) => [createdItem, ...prev]);
+      return createdItem;
+    }
+
+    const path = `users/${user.uid}/solvedAssignments/${id}`;
+    try {
+      await setDoc(doc(db, 'users', user.uid, 'solvedAssignments', id), {
+        userId: user.uid,
+        assignmentName: cleanAssignmentName,
+        subject: cleanSubject,
+        question: cleanQuestion,
+        solution: solutionPayload,
+        createdAt: serverTimestamp(),
+      });
+      return createdItem;
+    } catch (error) {
+      handleFirestoreError(error, OperationType.CREATE, path);
+    }
+  };
+
+  const deleteSolvedAssignment = async (id: string) => {
+    if (!user) {
+      setSolvedAssignments((prev) => prev.filter((s) => s.id !== id));
+      return;
+    }
+    const path = `users/${user.uid}/solvedAssignments/${id}`;
+    try {
+      await deleteDoc(doc(db, 'users', user.uid, 'solvedAssignments', id));
+    } catch (error) {
+      handleFirestoreError(error, OperationType.DELETE, path);
+    }
+  };
+
   const clearPracticeHistory = async () => {
     if (!user) {
       setSavedSolutions([]);
@@ -967,6 +1085,7 @@ export const WorkspaceProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         user,
         authLoading,
         syncError,
+        clearSyncError,
         signInWithGoogle,
         signOutUser,
         activeView,
@@ -977,13 +1096,19 @@ export const WorkspaceProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         setRevisionInitialTab,
         isAddAssignmentOpen,
         setIsAddAssignmentOpen,
+        selectedSolvedAssignment,
+        setSelectedSolvedAssignment,
+        pendingSolverPrompt,
+        setPendingSolverPrompt,
         profile,
         assignments,
         goals,
         timelineEvents,
         savedSolutions,
+        solvedAssignments,
         revisionItems,
         addAssignment,
+        updateAssignmentDetails,
         updateAssignmentStatus,
         deleteAssignment,
         addGoal,
@@ -993,6 +1118,8 @@ export const WorkspaceProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         deleteTimelineEvent,
         saveSolution,
         deleteSolution,
+        saveSolvedAssignment,
+        deleteSolvedAssignment,
         saveRevisionItem,
         deleteRevisionItem,
         awardXp,

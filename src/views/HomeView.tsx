@@ -13,7 +13,16 @@ import { useWorkspace } from '../context/WorkspaceContext';
 import { MathFormula } from '../components/MathRenderer';
 
 export const HomeView: React.FC = () => {
-  const { user, signInWithGoogle, setActiveView, assignments, goals, profile } = useWorkspace();
+  const {
+    user,
+    signInWithGoogle,
+    syncError,
+    setActiveView,
+    assignments,
+    goals,
+    profile,
+    solvedAssignments,
+  } = useWorkspace();
   const [launching, setLaunching] = React.useState(false);
 
   const handleLaunchWorkspace = async () => {
@@ -145,6 +154,15 @@ export const HomeView: React.FC = () => {
               </button>
             </div>
 
+            {syncError && (
+              <div
+                role="alert"
+                className="mt-4 max-w-xl p-3.5 rounded-xl bg-rose-50 border border-rose-200 text-xs sm:text-sm text-rose-700"
+              >
+                {syncError}
+              </div>
+            )}
+
             <div className="mt-8 pt-6 border-t border-[#EAECEF] flex flex-wrap items-center gap-6 text-sm text-[#5A607F]">
               <div className="flex items-center gap-2">
                 <CheckCircle2 className="w-4 h-4 text-[#00B894]" />
@@ -180,18 +198,34 @@ export const HomeView: React.FC = () => {
                 </span>
               </div>
 
-              {/* Sample Solver Preview */}
-              <div className="p-4 rounded-xl bg-[#F8F9FB] border border-[#EAECEF] space-y-2.5">
-                <p className="text-xs font-semibold text-[#6C5CE7]">
-                  AI Assignment Solver · Differential Equations
-                </p>
-                <p className="text-sm font-medium text-[#16192C]">
-                  Solve dy/dx + 2y = x with y(0) = 1
-                </p>
-                <div className="px-3 py-2 rounded-lg bg-white border border-[#EAECEF] overflow-x-auto text-sm">
-                  <MathFormula formula="y(x) = \frac{x}{2} - \frac{1}{4} + \frac{5}{4}e^{-2x}" displayMode />
+              {/* Live Workspace Solver Status */}
+              {solvedAssignments[0] ? (
+                <div className="p-4 rounded-xl bg-[#F8F9FB] border border-[#EAECEF] space-y-2">
+                  <p className="text-xs font-semibold text-[#6C5CE7]">
+                    Latest Saved Solution · {solvedAssignments[0].subject}
+                  </p>
+                  <p className="text-sm font-medium text-[#16192C] line-clamp-2">
+                    {solvedAssignments[0].assignmentName}
+                  </p>
+                  {solvedAssignments[0].solution.finalAnswer && (
+                    <div className="px-3 py-2 rounded-lg bg-white border border-[#EAECEF] overflow-x-auto text-sm">
+                      <MathFormula formula={solvedAssignments[0].solution.finalAnswer} displayMode />
+                    </div>
+                  )}
                 </div>
-              </div>
+              ) : (
+                <div className="p-4 rounded-xl bg-[#F8F9FB] border border-dashed border-[#CBD2E0] space-y-1.5">
+                  <p className="text-xs font-semibold text-[#6C5CE7]">AI Assignment Solver</p>
+                  <p className="text-sm font-medium text-[#16192C]">
+                    {user ? 'No saved solutions yet' : 'Sign in to start your personal workspace'}
+                  </p>
+                  <p className="text-xs text-[#5A607F] leading-relaxed">
+                    {user
+                      ? 'Solve any math, coding, or theory question and save it directly to your Firestore library.'
+                      : 'Your assignments, handwritten uploads, saved solutions, and goals stay synced privately to your Google account.'}
+                  </p>
+                </div>
+              )}
 
               {/* Quick Module Preview Metrics */}
               <div className="grid grid-cols-2 gap-3">

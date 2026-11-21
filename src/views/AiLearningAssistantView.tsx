@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Send, Loader2, Sparkles, BookOpen, ChevronRight } from 'lucide-react';
 import { useWorkspace } from '../context/WorkspaceContext';
 import { MathFormula, RichMathText } from '../components/MathRenderer';
+import { explainConceptWithAssistant } from '../lib/gemini';
 
 interface StructuredExplanation {
   topicTitle: string;
@@ -19,35 +20,13 @@ interface StructuredExplanation {
   walkthrough: string[];
 }
 
-const DEFAULT_EXPLANATION: StructuredExplanation = {
-  topicTitle: 'What is the Pythagorean Theorem?',
-  simpleExplanation:
-    'The Pythagorean Theorem helps us find the length of a missing side in any right-angled triangle. If you know two sides, you can immediately calculate the third.',
-  coreFormulaOrRule: {
-    label: 'Core Formula',
-    formula: 'a^2 + b^2 = c^2',
-    note: 'where a and b are the two perpendicular legs, and c is the longest side (hypotenuse).',
-  },
-  example: {
-    scenario: 'Suppose a = 3 and b = 4',
-    expression: 'c = \\sqrt{3^2 + 4^2} = \\sqrt{9 + 16} = \\sqrt{25}',
-    result: 'c = 5',
-  },
-  walkthrough: [
-    'Identify the right angle and confirm which side is the hypotenuse (opposite the 90° angle).',
-    'Plug the two known side lengths into a² + b² = c².',
-    'Square each number and add them together.',
-    'Take the square root to solve for the missing side c.',
-  ],
-};
-
 export const AiLearningAssistantView: React.FC = () => {
   const { profile, awardXp } = useWorkspace();
 
   const [simpleEnglish, setSimpleEnglish] = useState(true);
   const [questionInput, setQuestionInput] = useState('');
-  const [currentQuestion, setCurrentQuestion] = useState('What is the Pythagorean Theorem?');
-  const [explanation, setExplanation] = useState<StructuredExplanation>(DEFAULT_EXPLANATION);
+  const [currentQuestion, setCurrentQuestion] = useState('');
+  const [explanation, setExplanation] = useState<StructuredExplanation | null>(null);
   const [history, setHistory] = useState<Array<{ role: 'user' | 'model'; text: string }>>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -62,17 +41,11 @@ export const AiLearningAssistantView: React.FC = () => {
     setCurrentQuestion(clean);
 
     try {
-      const res = await fetch('/api/ai/learn', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          question: clean,
-          simpleEnglish: useSimple,
-          history,
-        }),
+      const data = await explainConceptWithAssistant({
+        question: clean,
+        simpleEnglish: useSimple,
+        history,
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Failed to get explanation.');
 
       setExplanation(data);
       setHistory((prev) => [
@@ -190,10 +163,12 @@ export const AiLearningAssistantView: React.FC = () => {
             )}
 
             {/* Your Question */}
-            <div className="p-4 rounded-xl bg-white/8 border border-white/10">
-              <p className="text-[11px] font-medium text-[#A29BFE]">Your Question</p>
-              <p className="text-base font-semibold mt-1">{currentQuestion}</p>
-            </div>
+            {currentQuestion && (
+              <div className="p-4 rounded-xl bg-white/8 border border-white/10">
+                <p className="text-[11px] font-medium text-[#A29BFE]">Your Question</p>
+                <p className="text-base font-semibold mt-1">{currentQuestion}</p>
+              </div>
+            )}
 
             {loading ? (
               <div className="py-20 flex flex-col items-center justify-center text-center">
@@ -202,7 +177,7 @@ export const AiLearningAssistantView: React.FC = () => {
                   Crafting your 4-part structured explanation...
                 </p>
               </div>
-            ) : (
+            ) : explanation ? (
               <div className="space-y-4">
                 {/* Section 1: Simple Explanation */}
                 <div className="p-4 rounded-xl bg-white/8 border border-white/10">
@@ -276,6 +251,18 @@ export const AiLearningAssistantView: React.FC = () => {
                     ))}
                   </ol>
                 </div>
+              </div>
+            ) : (
+              <div className="py-20 px-4 flex flex-col items-center justify-center text-center">
+                <span className="w-12 h-12 rounded-2xl bg-white/10 text-[#A29BFE] flex items-center justify-center mb-4">
+                  <Sparkles className="w-6 h-6" />
+                </span>
+                <p className="font-display text-base font-semibold text-white">
+                  Ask any concept to start learning
+                </p>
+                <p className="text-xs sm:text-sm text-white/70 mt-1.5 max-w-md leading-relaxed">
+                  Type a topic below, select a quick chip above, or pick a module from Your Learning Path on the right for a 4-part structured breakdown.
+                </p>
               </div>
             )}
           </div>
