@@ -1,0 +1,6 @@
+{
+  "name": "Sturio.io",
+  "description": "Smart Assignment Hub and AI Study Workspace with assignment tracking, Gemini-powered step-by-step problem solving, conversational tutoring, and quick revision tools.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
