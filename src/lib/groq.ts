@@ -4,7 +4,7 @@ declare const process: { env: { GROQ_API_KEY?: string } };
 
 const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const TEXT_MODEL = 'llama-3.3-70b-versatile';
-const VISION_MODEL = 'meta-llama/llama-4-scout-17b-16e-instruct';
+const VISION_MODEL = 'meta-llama/llama-4-maverick-17b-128e-instruct';
 
 const ALLOWED_IMAGE_MIME_TYPES = new Set([
   'image/png',
@@ -145,6 +145,16 @@ async function callGroqChat(params: {
 
   if (!response.ok) {
     const errMsg = payload.error?.message || `Groq API request failed (${response.status}).`;
+    const errCode = (payload.error?.code || '').toLowerCase();
+    const isModelNotFound =
+      response.status === 404 ||
+      errCode === 'model_not_found' ||
+      errCode === 'model_decommissioned' ||
+      /model.*not\s*found|does not exist|decommissioned/i.test(errMsg);
+
+    if (isModelNotFound) {
+      throw Object.assign(new Error(errMsg), { isModelNotFound: true });
+    }
     if (response.status === 401 || response.status === 403) {
       throw new Error(
         'Invalid or unauthorized Groq API key. Please check VITE_GROQ_API_KEY in your environment variables.'
@@ -224,14 +234,41 @@ Question: ${cleanQuestion || 'Read and solve the problem shown in the attached i
     ];
   }
 
-  const raw = await callGroqChat({
-    model,
-    jsonMode: true,
-    messages: [
-      { role: 'system', content: systemPrompt },
-      { role: 'user', content: userContent },
-    ],
-  });
+  let raw: string;
+  try {
+    raw = await callGroqChat({
+      model,
+      jsonMode: true,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userContent },
+      ],
+    });
+  } catch (err) {
+    const isModelNotFound =
+      typeof err === 'object' &&
+      err !== null &&
+      'isModelNotFound' in err &&
+      Boolean((err as { isModelNotFound?: boolean }).isModelNotFound);
+
+    if (model !== TEXT_MODEL && isModelNotFound) {
+      if (!cleanQuestion) {
+        throw new Error(
+          'The vision model is unavailable for image-only uploads. Please also type your question text to solve it.'
+        );
+      }
+      raw = await callGroqChat({
+        model: TEXT_MODEL,
+        jsonMode: true,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: promptText },
+        ],
+      });
+    } else {
+      throw err;
+    }
+  }
 
   const parsed = parseJsonResponse<Partial<SolvedProblemResult>>(raw);
   const steps: SolutionStep[] = Array.isArray(parsed.steps)
