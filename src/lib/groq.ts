@@ -2,9 +2,13 @@ import { RevisionToolType, SolutionStep } from '../types';
 
 declare const process: { env: { GROQ_API_KEY?: string } };
 
-const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
-const TEXT_MODEL = 'llama-3.3-70b-versatile';
-const VISION_MODEL = 'meta-llama/llama-4-maverick-17b-128e-instruct';
+const GROQ_MODELS_URL = 'https://api.groq.com/openai/v1/models';
+const GROQ_CHAT_URL = 'https://api.groq.com/openai/v1/chat/completions';
+
+const NON_CHAT_MODEL_PATTERN =
+  /whisper|tts|playai|orpheus|guard|safeguard|prompt-guard|embed|rerank|moderation|s2t|asr|allam/i;
+
+const VISION_MODEL_PATTERN = /vision|scout|maverick|llama-4|llava/i;
 
 const ALLOWED_IMAGE_MIME_TYPES = new Set([
   'image/png',
@@ -53,6 +57,24 @@ interface GroqMessage {
   content: string | GroqContentPart[];
 }
 
+interface GroqModelEntry {
+  id: string;
+  active?: boolean;
+  object?: string;
+}
+
+interface ModelCache {
+  apiKey: string;
+  textCandidates: string[];
+  visionCandidates: string[];
+  selectedTextModel: string | null;
+  selectedVisionModel: string | null;
+  rejectedModels: Set<string>;
+}
+
+let modelCache: ModelCache | null = null;
+let inflightModelsPromise: Promise<ModelCache> | null = null;
+
 function getGroqApiKey(): string {
   const viteKey =
     typeof import.meta !== 'undefined' &&
@@ -73,6 +95,107 @@ function getGroqApiKey(): string {
   }
 
   return '';
+}
+
+function scoreTextModel(id: string): number {
+  const lower = id.toLowerCase();
+  if (lower.includes('llama-3.3-70b')) return 100;
+  if (lower.includes('llama-4-maverick')) return 95;
+  if (lower.includes('llama-4-scout')) return 92;
+  if (lower.includes('llama-3.1-70b') || lower.includes('llama3-70b')) return 90;
+  if (lower.includes('llama') && lower.includes('70b')) return 88;
+  if (lower.includes('llama-3.1-8b')) return 84;
+  if (lower.includes('llama')) return 80;
+  if (lower.includes('qwen')) return 75;
+  if (lower.includes('gpt-oss')) return 72;
+  if (lower.includes('deepseek')) return 65;
+  if (lower.includes('gemma')) return 60;
+  if (lower.includes('mixtral') || lower.includes('mistral')) return 55;
+  return 40;
+}
+
+function scoreVisionModel(id: string): number {
+  const lower = id.toLowerCase();
+  if (lower.includes('llama-4-scout')) return 100;
+  if (lower.includes('llama-4-maverick')) return 96;
+  if (lower.includes('llama-4')) return 92;
+  if (lower.includes('llama') && lower.includes('vision')) return 88;
+  if (lower.includes('vision')) return 80;
+  return 50;
+}
+
+async function fetchAvailableGroqModels(apiKey: string, forceRefresh = false): Promise<ModelCache> {
+  if (!forceRefresh && modelCache && modelCache.apiKey === apiKey) {
+    return modelCache;
+  }
+
+  if (!forceRefresh && inflightModelsPromise) {
+    return inflightModelsPromise;
+  }
+
+  const promise = (async (): Promise<ModelCache> => {
+    const response = await fetch(GROQ_MODELS_URL, {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+      },
+    });
+
+    const payload = (await response.json().catch(() => ({}))) as {
+      data?: GroqModelEntry[];
+      error?: { message?: string };
+    };
+
+    if (!response.ok) {
+      if (response.status === 401 || response.status === 403) {
+        throw new Error(
+          'Invalid or unauthorized Groq API key. Please check VITE_GROQ_API_KEY in your environment variables.'
+        );
+      }
+      throw new Error(
+        payload.error?.message || `Unable to fetch available Groq models (${response.status}).`
+      );
+    }
+
+    const rawModels = Array.isArray(payload.data) ? payload.data : [];
+    const eligibleIds = rawModels
+      .filter((m) => Boolean(m?.id) && m.active !== false && !NON_CHAT_MODEL_PATTERN.test(m.id))
+      .map((m) => m.id);
+
+    if (eligibleIds.length === 0) {
+      throw new Error('No active chat models were found on this Groq account.');
+    }
+
+    const textCandidates = [...eligibleIds].sort((a, b) => scoreTextModel(b) - scoreTextModel(a));
+    const visionCandidates = eligibleIds
+      .filter((id) => VISION_MODEL_PATTERN.test(id))
+      .sort((a, b) => scoreVisionModel(b) - scoreVisionModel(a));
+
+    const previousRejected =
+      modelCache && modelCache.apiKey === apiKey ? modelCache.rejectedModels : new Set<string>();
+
+    const nextCache: ModelCache = {
+      apiKey,
+      textCandidates,
+      visionCandidates,
+      selectedTextModel: textCandidates.find((id) => !previousRejected.has(id)) || textCandidates[0],
+      selectedVisionModel:
+        visionCandidates.find((id) => !previousRejected.has(id)) || visionCandidates[0] || null,
+      rejectedModels: previousRejected,
+    };
+
+    modelCache = nextCache;
+    return nextCache;
+  })();
+
+  inflightModelsPromise = promise;
+  try {
+    return await promise;
+  } finally {
+    if (inflightModelsPromise === promise) {
+      inflightModelsPromise = null;
+    }
+  }
 }
 
 function parseJsonResponse<T>(text: string | undefined): T {
@@ -106,19 +229,13 @@ function sanitizeHistory(
     .filter((item) => item.text.length > 0);
 }
 
-async function callGroqChat(params: {
+async function sendCompletionRequest(params: {
+  apiKey: string;
   model: string;
   messages: GroqMessage[];
   jsonMode?: boolean;
   temperature?: number;
 }): Promise<string> {
-  const apiKey = getGroqApiKey();
-  if (!apiKey) {
-    throw new Error(
-      'Groq API key is missing. Set VITE_GROQ_API_KEY in your environment variables (.env or Vercel Project Settings).'
-    );
-  }
-
   const body: Record<string, unknown> = {
     model: params.model,
     messages: params.messages,
@@ -129,11 +246,11 @@ async function callGroqChat(params: {
     body.response_format = { type: 'json_object' };
   }
 
-  const response = await fetch(GROQ_API_URL, {
+  const response = await fetch(GROQ_CHAT_URL, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${apiKey}`,
+      Authorization: `Bearer ${params.apiKey}`,
     },
     body: JSON.stringify(body),
   });
@@ -146,15 +263,7 @@ async function callGroqChat(params: {
   if (!response.ok) {
     const errMsg = payload.error?.message || `Groq API request failed (${response.status}).`;
     const errCode = (payload.error?.code || '').toLowerCase();
-    const isModelNotFound =
-      response.status === 404 ||
-      errCode === 'model_not_found' ||
-      errCode === 'model_decommissioned' ||
-      /model.*not\s*found|does not exist|decommissioned/i.test(errMsg);
 
-    if (isModelNotFound) {
-      throw Object.assign(new Error(errMsg), { isModelNotFound: true });
-    }
     if (response.status === 401 || response.status === 403) {
       throw new Error(
         'Invalid or unauthorized Groq API key. Please check VITE_GROQ_API_KEY in your environment variables.'
@@ -163,6 +272,26 @@ async function callGroqChat(params: {
     if (response.status === 429) {
       throw new Error('Groq API rate limit reached. Please wait a moment and try again.');
     }
+
+    const isModelUnavailable =
+      response.status === 404 ||
+      errCode === 'model_not_found' ||
+      errCode === 'model_decommissioned' ||
+      /model.*not\s*found|does not exist|decommissioned|not supported/i.test(errMsg);
+
+    const isJsonModeUnsupported =
+      params.jsonMode &&
+      response.status === 400 &&
+      /response_format|json_object|json mode/i.test(errMsg);
+
+    if (isJsonModeUnsupported) {
+      return sendCompletionRequest({ ...params, jsonMode: false });
+    }
+
+    if (isModelUnavailable) {
+      throw Object.assign(new Error(errMsg), { isModelUnavailable: true });
+    }
+
     throw new Error(errMsg);
   }
 
@@ -171,6 +300,87 @@ async function callGroqChat(params: {
     throw new Error('Groq returned an empty response. Please try again.');
   }
   return content;
+}
+
+async function callGroqChat(params: {
+  messages: GroqMessage[];
+  requiresVision?: boolean;
+  jsonMode?: boolean;
+  temperature?: number;
+}): Promise<string> {
+  const apiKey = getGroqApiKey();
+  if (!apiKey) {
+    throw new Error(
+      'Groq API key is missing. Set VITE_GROQ_API_KEY in your environment variables (.env or Vercel Project Settings).'
+    );
+  }
+
+  let cache = await fetchAvailableGroqModels(apiKey);
+  const candidates = params.requiresVision
+    ? cache.visionCandidates.filter((id) => !cache.rejectedModels.has(id))
+    : cache.textCandidates.filter((id) => !cache.rejectedModels.has(id));
+
+  if (candidates.length === 0) {
+    cache = await fetchAvailableGroqModels(apiKey, true);
+  }
+
+  const pool = params.requiresVision ? cache.visionCandidates : cache.textCandidates;
+  const preferred = params.requiresVision ? cache.selectedVisionModel : cache.selectedTextModel;
+  const orderedCandidates = [
+    ...(preferred && pool.includes(preferred) && !cache.rejectedModels.has(preferred)
+      ? [preferred]
+      : []),
+    ...pool.filter((id) => id !== preferred && !cache.rejectedModels.has(id)),
+  ];
+
+  if (orderedCandidates.length === 0) {
+    throw Object.assign(
+      new Error(
+        params.requiresVision
+          ? 'No vision-capable model is currently available on this Groq account.'
+          : 'No active chat model is currently available on this Groq account.'
+      ),
+      { isNoVisionModel: params.requiresVision }
+    );
+  }
+
+  let lastErr: unknown;
+  for (const modelId of orderedCandidates) {
+    try {
+      const content = await sendCompletionRequest({
+        apiKey,
+        model: modelId,
+        messages: params.messages,
+        jsonMode: params.jsonMode,
+        temperature: params.temperature,
+      });
+      if (params.requiresVision) {
+        cache.selectedVisionModel = modelId;
+      } else {
+        cache.selectedTextModel = modelId;
+      }
+      return content;
+    } catch (err) {
+      lastErr = err;
+      const isModelUnavailable =
+        typeof err === 'object' &&
+        err !== null &&
+        'isModelUnavailable' in err &&
+        Boolean((err as { isModelUnavailable?: boolean }).isModelUnavailable);
+
+      if (isModelUnavailable) {
+        cache.rejectedModels.add(modelId);
+        if (cache.selectedTextModel === modelId) cache.selectedTextModel = null;
+        if (cache.selectedVisionModel === modelId) cache.selectedVisionModel = null;
+        continue;
+      }
+      throw err;
+    }
+  }
+
+  throw lastErr instanceof Error
+    ? lastErr
+    : new Error('Unable to complete request with available Groq models.');
 }
 
 export async function solveAssignmentProblem(params: {
@@ -211,8 +421,7 @@ Ensure "steps" is a non-empty array with sequential stepNumber values starting a
 Subject hint: ${cleanSubject || 'Auto-detect (Mathematics, Programming, Physics, Chemistry, or Theory)'}
 Question: ${cleanQuestion || 'Read and solve the problem shown in the attached image.'}`;
 
-  let userContent: string | GroqContentPart[] = promptText;
-  let model = TEXT_MODEL;
+  let raw: string;
 
   if (cleanImage) {
     const mime =
@@ -227,47 +436,54 @@ Question: ${cleanQuestion || 'Read and solve the problem shown in the attached i
       ? cleanImage
       : `data:${mime};base64,${base64Data}`;
 
-    model = VISION_MODEL;
-    userContent = [
+    const visionContent: GroqContentPart[] = [
       { type: 'image_url', image_url: { url: imageUrl } },
       { type: 'text', text: promptText },
     ];
-  }
 
-  let raw: string;
-  try {
-    raw = await callGroqChat({
-      model,
-      jsonMode: true,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userContent },
-      ],
-    });
-  } catch (err) {
-    const isModelNotFound =
-      typeof err === 'object' &&
-      err !== null &&
-      'isModelNotFound' in err &&
-      Boolean((err as { isModelNotFound?: boolean }).isModelNotFound);
-
-    if (model !== TEXT_MODEL && isModelNotFound) {
-      if (!cleanQuestion) {
-        throw new Error(
-          'The vision model is unavailable for image-only uploads. Please also type your question text to solve it.'
-        );
-      }
+    try {
       raw = await callGroqChat({
-        model: TEXT_MODEL,
+        requiresVision: true,
         jsonMode: true,
         messages: [
           { role: 'system', content: systemPrompt },
-          { role: 'user', content: promptText },
+          { role: 'user', content: visionContent },
         ],
       });
-    } else {
-      throw err;
+    } catch (err) {
+      const noVision =
+        typeof err === 'object' &&
+        err !== null &&
+        (('isNoVisionModel' in err && Boolean((err as { isNoVisionModel?: boolean }).isNoVisionModel)) ||
+          ('isModelUnavailable' in err &&
+            Boolean((err as { isModelUnavailable?: boolean }).isModelUnavailable)));
+
+      if (noVision && cleanQuestion) {
+        raw = await callGroqChat({
+          requiresVision: false,
+          jsonMode: true,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: promptText },
+          ],
+        });
+      } else if (noVision) {
+        throw new Error(
+          'No active vision model is currently available on your Groq account for image-only uploads. Please type your question text to solve it.'
+        );
+      } else {
+        throw err;
+      }
     }
+  } else {
+    raw = await callGroqChat({
+      requiresVision: false,
+      jsonMode: true,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: promptText },
+      ],
+    });
   }
 
   const parsed = parseJsonResponse<Partial<SolvedProblemResult>>(raw);
@@ -329,7 +545,7 @@ export async function solveAssignmentFollowUp(params: {
   ];
 
   return callGroqChat({
-    model: TEXT_MODEL,
+    requiresVision: false,
     messages,
   });
 }
@@ -379,7 +595,7 @@ Return ONLY a valid JSON object matching this exact schema:
 Use $...$ for inline math inside prose fields.`;
 
   const raw = await callGroqChat({
-    model: TEXT_MODEL,
+    requiresVision: false,
     jsonMode: true,
     messages: [
       { role: 'system', content: systemPrompt },
@@ -422,7 +638,7 @@ export async function generateRevisionMaterial(params: {
 
   if (params.tool === 'notes') {
     const raw = await callGroqChat({
-      model: TEXT_MODEL,
+      requiresVision: false,
       jsonMode: true,
       messages: [
         {
@@ -446,7 +662,7 @@ Return ONLY valid JSON:
 
   if (params.tool === 'questions') {
     const raw = await callGroqChat({
-      model: TEXT_MODEL,
+      requiresVision: false,
       jsonMode: true,
       messages: [
         {
@@ -470,7 +686,7 @@ Return ONLY valid JSON:
 
   if (params.tool === 'mcq') {
     const raw = await callGroqChat({
-      model: TEXT_MODEL,
+      requiresVision: false,
       jsonMode: true,
       messages: [
         {
@@ -522,7 +738,7 @@ Return ONLY valid JSON:
 
   if (params.tool === 'flashcards') {
     const raw = await callGroqChat({
-      model: TEXT_MODEL,
+      requiresVision: false,
       jsonMode: true,
       messages: [
         {
@@ -545,7 +761,7 @@ Return ONLY valid JSON:
   }
 
   const raw = await callGroqChat({
-    model: TEXT_MODEL,
+    requiresVision: false,
     jsonMode: true,
     messages: [
       {
@@ -583,7 +799,7 @@ export async function runLanguageTutorSession(params: {
       : 'Academic English & French';
 
   return callGroqChat({
-    model: TEXT_MODEL,
+    requiresVision: false,
     messages: [
       {
         role: 'system',
