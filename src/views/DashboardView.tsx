@@ -19,7 +19,7 @@ import {
   Loader2,
 } from 'lucide-react';
 import { useWorkspace } from '../context/WorkspaceContext';
-import { runLanguageTutorSession } from '../lib/gemini';
+import { runLanguageTutorSession } from '../lib/groq';
 
 export const DashboardView: React.FC = () => {
   const {

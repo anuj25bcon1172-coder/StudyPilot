@@ -18,7 +18,7 @@ import { useWorkspace } from '../context/WorkspaceContext';
 import { MathFormula, RichMathText } from '../components/MathRenderer';
 import { formatSolvedAssignmentText } from '../lib/formatSolution';
 import { SolutionStep, SolvedAssignment } from '../types';
-import { solveAssignmentFollowUp, solveAssignmentProblem } from '../lib/gemini';
+import { solveAssignmentFollowUp, solveAssignmentProblem } from '../lib/groq';
 
 interface ActiveSolution {
   question: string;
@@ -456,7 +456,7 @@ export const AiSolverView: React.FC = () => {
                   {loading ? (
                     <>
                       <Loader2 className="w-4 h-4 animate-spin" />
-                      <span>Solving with Gemini...</span>
+                      <span>Solving with AI...</span>
                     </>
                   ) : (
                     <>

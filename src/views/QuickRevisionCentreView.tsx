@@ -16,7 +16,7 @@ import {
 } from 'lucide-react';
 import { useWorkspace } from '../context/WorkspaceContext';
 import { RevisionItem, RevisionToolType } from '../types';
-import { generateRevisionMaterial } from '../lib/gemini';
+import { generateRevisionMaterial } from '../lib/groq';
 
 interface McqQuestion {
   question: string;
@@ -440,7 +440,7 @@ export const QuickRevisionCentreView: React.FC = () => {
             <div className="bg-white border border-[#EAECEF] rounded-2xl p-12 flex flex-col items-center justify-center text-center">
               <Loader2 className="w-7 h-7 text-[#00B894] animate-spin mb-3" />
               <p className="text-sm font-medium text-[#16192C]">
-                Generating interactive study material with Gemini...
+                Generating interactive study material with AI...
               </p>
             </div>
           ) : hasResult ? (

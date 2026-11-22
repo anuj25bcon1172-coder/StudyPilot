@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { Send, Loader2, Sparkles, BookOpen, ChevronRight } from 'lucide-react';
 import { useWorkspace } from '../context/WorkspaceContext';
 import { MathFormula, RichMathText } from '../components/MathRenderer';
-import { explainConceptWithAssistant } from '../lib/gemini';
+import { explainConceptWithAssistant } from '../lib/groq';
 
 interface StructuredExplanation {
   topicTitle: string;
