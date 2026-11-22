@@ -19,6 +19,7 @@ import { MathFormula, RichMathText } from '../components/MathRenderer';
 import { formatSolvedAssignmentText } from '../lib/formatSolution';
 import { SolutionStep, SolvedAssignment } from '../types';
 import { solveAssignmentFollowUp, solveAssignmentProblem } from '../lib/groq';
+import { extractTextFromImage } from '../lib/ocr';
 
 interface ActiveSolution {
   question: string;
@@ -76,8 +77,13 @@ export const AiSolverView: React.FC = () => {
   const [subject, setSubject] = useState('Auto-detect');
   const [question, setQuestion] = useState('');
   const [imagePreview, setImagePreview] = useState<string | null>(null);
-  const [imageMimeType, setImageMimeType] = useState<string>('image/png');
+  const [extractedOcrText, setExtractedOcrText] = useState('');
+  const [ocrLoading, setOcrLoading] = useState(false);
+  const [ocrProgress, setOcrProgress] = useState(0);
+  const [ocrError, setOcrError] = useState('');
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const ocrPromiseRef = useRef<Promise<string> | null>(null);
+  const ocrJobIdRef = useRef(0);
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -135,6 +141,17 @@ export const AiSolverView: React.FC = () => {
     setSelectedSolvedAssignment(null);
   }, [selectedSolvedAssignment, setSelectedSolvedAssignment]);
 
+  const clearUploadedImage = () => {
+    ocrJobIdRef.current += 1;
+    ocrPromiseRef.current = null;
+    setImagePreview(null);
+    setExtractedOcrText('');
+    setOcrLoading(false);
+    setOcrProgress(0);
+    setOcrError('');
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
   const handleImageSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -142,23 +159,62 @@ export const AiSolverView: React.FC = () => {
       setError('Image must be smaller than 6 MB.');
       return;
     }
-    setImageMimeType(file.type || 'image/png');
+
+    const jobId = ++ocrJobIdRef.current;
+    setError('');
+    setOcrError('');
+    setExtractedOcrText('');
+    setOcrProgress(0);
+    setOcrLoading(true);
+
     const reader = new FileReader();
     reader.onload = () => {
-      if (typeof reader.result === 'string') {
-        setImagePreview(reader.result);
-        setError('');
-      }
+      if (typeof reader.result !== 'string' || ocrJobIdRef.current !== jobId) return;
+      const dataUrl = reader.result;
+      setImagePreview(dataUrl);
+
+      const ocrPromise = extractTextFromImage(dataUrl, (pct) => {
+        if (ocrJobIdRef.current === jobId) {
+          setOcrProgress(pct);
+        }
+      })
+        .then((text) => {
+          if (ocrJobIdRef.current === jobId) {
+            setExtractedOcrText(text);
+            if (!text) {
+              setOcrError('No readable text detected in this image. You can type or edit the question above.');
+            }
+          }
+          return text;
+        })
+        .catch((err) => {
+          if (ocrJobIdRef.current === jobId) {
+            setOcrError(
+              err instanceof Error ? err.message : 'Could not extract text from this image.'
+            );
+          }
+          return '';
+        })
+        .finally(() => {
+          if (ocrJobIdRef.current === jobId) {
+            setOcrLoading(false);
+          }
+        });
+
+      ocrPromiseRef.current = ocrPromise;
     };
     reader.readAsDataURL(file);
   };
 
   const handleSolve = async (e?: React.FormEvent) => {
     e?.preventDefault();
-    if (!question.trim() && !imagePreview) {
+    const typedPrompt = question.trim();
+
+    if (!typedPrompt && !imagePreview) {
       setError('Enter a question or upload an image of your problem.');
       return;
     }
+
     setLoading(true);
     setError('');
     setSaveError('');
@@ -166,18 +222,36 @@ export const AiSolverView: React.FC = () => {
     setFollowUps([]);
 
     try {
+      let ocrText = extractedOcrText.trim();
+      if (imagePreview && ocrLoading && ocrPromiseRef.current) {
+        ocrText = (await ocrPromiseRef.current).trim();
+      } else if (imagePreview && !ocrText && !ocrError) {
+        ocrText = (await extractTextFromImage(imagePreview)).trim();
+        setExtractedOcrText(ocrText);
+      }
+
+      const combinedQuestion =
+        typedPrompt && ocrText
+          ? `${typedPrompt}\n\n[Extracted from uploaded image]:\n${ocrText}`
+          : typedPrompt || ocrText;
+
+      if (!combinedQuestion) {
+        setError(
+          'No readable text was detected in the uploaded image. Please try a clearer image or type your question above.'
+        );
+        return;
+      }
+
       const data = await solveAssignmentProblem({
-        question: question.trim(),
+        question: combinedQuestion,
         subject: subject === 'Auto-detect' ? undefined : subject,
-        imageBase64: imagePreview || undefined,
-        imageMimeType: imagePreview ? imageMimeType : undefined,
       });
 
       const resolvedSubject =
         data.subject || (subject !== 'Auto-detect' ? subject : 'Mathematics');
 
       setSolution({
-        question: question.trim() || 'Uploaded problem image',
+        question: combinedQuestion,
         subject: resolvedSubject,
         title: data.title,
         steps: Array.isArray(data.steps) ? data.steps : [],
@@ -412,23 +486,50 @@ export const AiSolverView: React.FC = () => {
                     className="hidden"
                   />
                   {imagePreview ? (
-                    <div className="relative rounded-xl overflow-hidden border border-[#EAECEF] bg-white p-2">
-                      <img
-                        src={imagePreview}
-                        alt="Uploaded problem preview"
-                        className="w-full max-h-36 object-contain rounded-lg"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setImagePreview(null);
-                          if (fileInputRef.current) fileInputRef.current.value = '';
-                        }}
-                        aria-label="Remove uploaded image"
-                        className="absolute top-3 right-3 p-1 rounded-full bg-[#16192C]/75 text-white hover:bg-[#16192C] cursor-pointer"
-                      >
-                        <X className="w-3.5 h-3.5" />
-                      </button>
+                    <div className="space-y-2">
+                      <div className="relative rounded-xl overflow-hidden border border-[#EAECEF] bg-white p-2">
+                        <img
+                          src={imagePreview}
+                          alt="Uploaded problem preview"
+                          className="w-full max-h-36 object-contain rounded-lg"
+                        />
+                        <button
+                          type="button"
+                          onClick={clearUploadedImage}
+                          aria-label="Remove uploaded image"
+                          className="absolute top-3 right-3 p-1 rounded-full bg-[#16192C]/75 text-white hover:bg-[#16192C] cursor-pointer"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+
+                      {ocrLoading ? (
+                        <div className="flex items-center gap-2 px-3 py-2 rounded-xl bg-[#F1EFFE] text-[#6C5CE7] text-xs font-medium">
+                          <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+                          <span>
+                            Extracting text from image{ocrProgress > 0 ? ` (${ocrProgress}%)` : '...'}
+                          </span>
+                        </div>
+                      ) : extractedOcrText ? (
+                        <div className="rounded-xl bg-white border border-[#EAECEF] p-2.5 space-y-1">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-[11px] font-semibold text-[#00896E]">
+                              Extracted OCR Text (editable)
+                            </span>
+                          </div>
+                          <textarea
+                            rows={3}
+                            value={extractedOcrText}
+                            onChange={(e) => setExtractedOcrText(e.target.value)}
+                            aria-label="Extracted text from image"
+                            className="w-full text-xs text-[#16192C] bg-[#FAFBFD] border border-[#EAECEF] rounded-lg p-2 focus:outline-none focus:border-[#6C5CE7] resize-y"
+                          />
+                        </div>
+                      ) : ocrError ? (
+                        <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2">
+                          {ocrError}
+                        </p>
+                      ) : null}
                     </div>
                   ) : (
                     <button

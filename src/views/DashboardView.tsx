@@ -17,6 +17,8 @@ import {
   X,
   Send,
   Loader2,
+  Bell,
+  BellRing,
 } from 'lucide-react';
 import { useWorkspace } from '../context/WorkspaceContext';
 import { runLanguageTutorSession } from '../lib/groq';
@@ -39,6 +41,11 @@ export const DashboardView: React.FC = () => {
     setRevisionInitialTool,
     setIsAddAssignmentOpen,
     awardXp,
+    remindersEnabled,
+    notificationPermission,
+    fcmToken,
+    pushRequesting,
+    enableOrToggleReminders,
   } = useWorkspace();
 
   const [newGoalTitle, setNewGoalTitle] = useState('');
@@ -191,8 +198,77 @@ export const DashboardView: React.FC = () => {
     })),
   ].slice(0, 6);
 
+  const hasVapidKey = Boolean(
+    typeof import.meta.env.VITE_FIREBASE_VAPID_KEY === 'string' &&
+      import.meta.env.VITE_FIREBASE_VAPID_KEY.trim()
+  );
+  const isBrowserRemindersActive =
+    remindersEnabled &&
+    notificationPermission === 'granted' &&
+    (!hasVapidKey || Boolean(fcmToken));
+  const isInAppOnlyActive =
+    remindersEnabled &&
+    (notificationPermission === 'denied' || notificationPermission === 'unsupported');
+
   return (
-    <div className="px-6 lg:px-10 py-8 max-w-[1440px] mx-auto">
+    <div className="px-6 lg:px-10 py-8 max-w-[1440px] mx-auto space-y-6">
+      {/* Dashboard Header */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div>
+          <h1 className="font-display text-2xl font-bold text-[#16192C] tracking-tight">
+            Dashboard
+          </h1>
+          <p className="text-sm text-[#5A607F] mt-0.5">
+            Track today&apos;s goals, study schedule, and upcoming assignment deadlines.
+          </p>
+        </div>
+
+        <button
+          type="button"
+          disabled={pushRequesting}
+          onClick={() => void enableOrToggleReminders()}
+          aria-pressed={isBrowserRemindersActive || isInAppOnlyActive}
+          className={`inline-flex items-center gap-3 px-4 py-2.5 rounded-xl border text-sm font-medium transition-colors cursor-pointer disabled:opacity-70 whitespace-nowrap shrink-0 self-start sm:self-auto ${
+            isBrowserRemindersActive
+              ? 'bg-[#F1EFFE] border-[#6C5CE7]/35 text-[#4C3DC2] hover:bg-[#E7E2FD]'
+              : isInAppOnlyActive
+              ? 'bg-amber-50 border-amber-200 text-amber-900 hover:bg-amber-100/70'
+              : 'bg-white border-[#EAECEF] text-[#16192C] hover:border-[#6C5CE7]/50 hover:text-[#6C5CE7]'
+          }`}
+        >
+          {pushRequesting ? (
+            <Loader2 className="w-4 h-4 text-[#6C5CE7] animate-spin shrink-0" />
+          ) : isBrowserRemindersActive ? (
+            <BellRing className="w-4 h-4 text-[#6C5CE7] shrink-0" />
+          ) : (
+            <Bell className="w-4 h-4 shrink-0" />
+          )}
+          <span>
+            {pushRequesting
+              ? 'Enabling Push...'
+              : isBrowserRemindersActive
+              ? fcmToken
+                ? 'Push Notifications On'
+                : 'Due Reminders On'
+              : isInAppOnlyActive
+              ? 'In-App Reminders On'
+              : 'Enable Push Notifications'}
+          </span>
+          <span
+            aria-hidden="true"
+            className={`w-8 h-4.5 rounded-full p-0.5 transition-colors flex items-center ${
+              isBrowserRemindersActive
+                ? 'bg-[#6C5CE7] justify-end'
+                : isInAppOnlyActive
+                ? 'bg-amber-500 justify-end'
+                : 'bg-[#D8DDE6] justify-start'
+            }`}
+          >
+            <span className="w-3.5 h-3.5 rounded-full bg-white shadow-xs" />
+          </span>
+        </button>
+      </div>
+
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
         {/* Main Left/Center Workspace (8 cols) */}
         <div className="lg:col-span-8 space-y-6">

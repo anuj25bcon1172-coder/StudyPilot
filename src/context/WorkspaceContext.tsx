@@ -31,6 +31,11 @@ import {
   testConnection,
 } from '../lib/firebase';
 import {
+  BrowserNotificationPermission,
+  DueReminderAlert,
+  useDueAssignmentReminders,
+} from '../hooks/useDueAssignmentReminders';
+import {
   Assignment,
   AssignmentAttachment,
   AssignmentStatus,
@@ -158,6 +163,15 @@ interface WorkspaceContextValue {
   deleteRevisionItem: (id: string) => Promise<void>;
   awardXp: (amount: number) => Promise<void>;
   clearPracticeHistory: () => Promise<void>;
+  remindersEnabled: boolean;
+  notificationPermission: BrowserNotificationPermission;
+  fcmToken: string | null;
+  pushRequesting: boolean;
+  reminderAlerts: DueReminderAlert[];
+  reminderStatusFeedback: string | null;
+  dismissReminderAlert: (alertId: string) => void;
+  clearReminderStatusFeedback: () => void;
+  enableOrToggleReminders: () => Promise<void>;
 }
 
 const VIEW_PATHS: Record<ViewId, string> = {
@@ -1079,6 +1093,18 @@ export const WorkspaceProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     }
   };
 
+  const {
+    remindersEnabled,
+    notificationPermission,
+    fcmToken,
+    pushRequesting,
+    reminderAlerts,
+    statusFeedback: reminderStatusFeedback,
+    dismissReminderAlert,
+    clearStatusFeedback: clearReminderStatusFeedback,
+    enableOrToggleReminders,
+  } = useDueAssignmentReminders(user?.uid ?? null, assignments, () => setActiveView('assignments'));
+
   return (
     <WorkspaceContext.Provider
       value={{
@@ -1124,6 +1150,15 @@ export const WorkspaceProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         deleteRevisionItem,
         awardXp,
         clearPracticeHistory,
+        remindersEnabled,
+        notificationPermission,
+        fcmToken,
+        pushRequesting,
+        reminderAlerts,
+        reminderStatusFeedback,
+        dismissReminderAlert,
+        clearReminderStatusFeedback,
+        enableOrToggleReminders,
       }}
     >
       {children}

@@ -306,6 +306,46 @@
         }
       },
       "required": ["userId", "assignmentName", "subject", "question", "solution", "createdAt"]
+    },
+    "FcmToken": {
+      "title": "FcmToken",
+      "description": "Firebase Cloud Messaging device registration token and active incomplete assignment due dates for background push reminders.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "token": {
+          "type": "string",
+          "minLength": 20,
+          "maxLength": 512
+        },
+        "dueDates": {
+          "type": "array",
+          "description": "Sorted unique YYYY-MM-DD due dates of active incomplete assignments."
+        },
+        "activeAssignments": {
+          "type": "array",
+          "description": "Bounded summary of active incomplete assignments for notification payloads."
+        },
+        "platform": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["userId", "token", "dueDates", "activeAssignments", "createdAt", "updatedAt"]
     }
   },
   "firestore": {
@@ -336,6 +376,10 @@
     "/users/{userId}/solvedAssignments/{solvedId}": {
       "schema": { "$ref": "#/entities/SolvedAssignment" },
       "description": "Named solved assignments saved by the student from the AI Assignment Solver."
+    },
+    "/fcmTokens/{tokenId}": {
+      "schema": { "$ref": "#/entities/FcmToken" },
+      "description": "FCM push notification tokens paired with userId and incomplete assignment due dates."
     }
   }
 }

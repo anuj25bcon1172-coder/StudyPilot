@@ -155,6 +155,21 @@ service cloud.firestore {
         data.createdAt is timestamp;
     }
 
+    // Validation Blueprint: FcmToken
+    function isValidFcmToken(data) {
+      return data.keys().hasAll(['userId', 'token', 'dueDates', 'activeAssignments', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['userId', 'token', 'dueDates', 'activeAssignments', 'platform', 'createdAt', 'updatedAt']) &&
+        data.userId is string && data.userId == request.auth.uid && data.userId.size() >= 1 && data.userId.size() <= 128 &&
+        data.token is string && data.token.size() >= 20 && data.token.size() <= 512 &&
+        data.dueDates is list && data.dueDates.size() <= 100 &&
+        (data.dueDates.size() == 0 || data.dueDates[0] is string) &&
+        data.activeAssignments is list && data.activeAssignments.size() <= 100 &&
+        (data.activeAssignments.size() == 0 || data.activeAssignments[0] is map) &&
+        (!('platform' in data) || (data.platform is string && data.platform.size() >= 1 && data.platform.size() <= 40)) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
     // Student Profile Document
     match /users/{userId} {
       allow get: if isValidId(userId) && isOwner(userId);
@@ -278,6 +293,28 @@ service cloud.firestore {
         allow update: if false;
         allow delete: if isValidId(userId) && isValidId(solvedId) && isOwner(userId);
       }
+    }
+
+    // FCM Push Notification Device Tokens Collection
+    match /fcmTokens/{tokenId} {
+      allow get: if isValidId(tokenId) && isSignedIn() && resource.data.userId == request.auth.uid;
+      allow list: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow create: if isValidId(tokenId) &&
+        isSignedIn() &&
+        isValidFcmToken(incoming()) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(tokenId) &&
+        isSignedIn() &&
+        isValidFcmToken(incoming()) &&
+        resource.data.userId == request.auth.uid &&
+        incoming().userId == existing().userId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'token', 'dueDates', 'activeAssignments', 'platform', 'updatedAt'
+        ]);
+      allow delete: if isValidId(tokenId) && isSignedIn() && resource.data.userId == request.auth.uid;
     }
   }
 }
